@@ -14,6 +14,7 @@ SESSION="${SWITCH_SESSION:-handoff}"
 command -v claude >/dev/null || { echo "claude not on PATH" >&2; exit 1; }
 command -v tmux   >/dev/null || { echo "tmux not on PATH" >&2; exit 1; }
 test -s "$BRIEF" || { echo "brief missing or empty: $BRIEF" >&2; exit 1; }
+case "$(head -c1 "$BRIEF")" in -) echo "brief must not start with '-' (claude would parse it as a flag)" >&2; exit 1;; esac
 
 # 1. a private dir the parent watches (mktemp -d gives 0700)
 DIR=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/switch.XXXXXX")
@@ -37,8 +38,16 @@ WIN=$(tmux new-window -dP -t "$SESSION" -c "$WORKDIR" \
 echo "launched  window=$WIN  workdir=$WORKDIR  dir=$DIR"
 echo "watch:    tmux attach -t $SESSION"
 
-# 6. wait for the child's first turn to end
-for ((i=0; i<TIMEOUT; i++)); do [ -s "$DIR/done.json" ] && break; sleep 1; done
+# 6. wait for the child's first turn to end. A folder the child has not seen before shows the
+#    "trust this folder?" dialog; answer it only for the parent's own working directory.
+#    ponytail: screen scrape, same trick Orca's daemon uses; replace if claude grows a --trust flag.
+for ((i=0; i<TIMEOUT; i++)); do
+  [ -s "$DIR/done.json" ] && break
+  if [ "$WORKDIR" = "$PWD" ] && tmux capture-pane -p -t "$WIN" 2>/dev/null | grep -q "Yes, I trust this folder"; then
+    tmux send-keys -t "$WIN" Down Enter; echo "accepted trust dialog for $WORKDIR"; sleep 2
+  fi
+  sleep 1
+done
 [ -s "$DIR/done.json" ] || { echo "timeout after ${TIMEOUT}s; child still running in window $WIN" >&2; exit 2; }
 
 # 7. surface the result: session id, transcript, and the child's last message
