@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# session-switcher: from inside a running Claude Code session, open a new one, hand it a brief,
+# and get its first reply back. Mechanism copied from Orca's `worktree create --agent claude --prompt`:
+#   brief = one shell argv, identity = env vars, return channel = Claude Stop hook -> done.json.
+# Usage:  session-switcher <brief.md> [workdir]
+#   env:  CLAUDE_FLAGS="--dangerously-skip-permissions"   SWITCH_TIMEOUT=90   SWITCH_SESSION=handoff
+# Watch the child:  tmux attach -t handoff
+set -euo pipefail
+case "${1:-}" in -h|--help|"") sed -n 2,7p "$0"; exit 0;; esac
+BRIEF="$1"
+WORKDIR="$(cd "${2:-$PWD}" && pwd)"
+TIMEOUT="${SWITCH_TIMEOUT:-90}"
+SESSION="${SWITCH_SESSION:-handoff}"
+command -v claude >/dev/null || { echo "claude not on PATH" >&2; exit 1; }
+command -v tmux   >/dev/null || { echo "tmux not on PATH" >&2; exit 1; }
+test -s "$BRIEF" || { echo "brief missing or empty: $BRIEF" >&2; exit 1; }
+
+# 1. a private dir the parent watches (mktemp -d gives 0700)
+DIR=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/switch.XXXXXX")
+ID=${DIR##*/}
+PARENT="${CLAUDE_CODE_SESSION_ID:-$PPID}"
+
+# 2. return channel: Claude pipes the Stop event JSON into the hook; it lands as done.json
+printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"cat > %s/done.json"}]}]}}\n' "$DIR" > "$DIR/settings.json"
+
+# 3. the brief as ONE argv, POSIX-quoted the way Orca does it
+Q="'$(sed "s/'/'\\\\''/g" "$BRIEF")'"
+
+# 4. a tmux server whose environment does not say "you are inside Claude Code"
+SCRUB=$(env | grep -o '^CLAUDE[A-Z_]*=' | sed 's/=$//; s/^/-u /')
+tmux has-session -t "$SESSION" 2>/dev/null || env $SCRUB tmux new-session -d -s "$SESSION"
+
+# 5. launch: identity in env, brief in argv
+WIN=$(tmux new-window -dP -t "$SESSION" -c "$WORKDIR" \
+  -e SWITCH_ID="$ID" -e SWITCH_DIR="$DIR" -e SWITCH_PARENT="$PARENT" \
+  "claude ${CLAUDE_FLAGS:-} --settings $DIR/settings.json $Q")
+echo "launched  window=$WIN  workdir=$WORKDIR  dir=$DIR"
+echo "watch:    tmux attach -t $SESSION"
+
+# 6. wait for the child's first turn to end
+for ((i=0; i<TIMEOUT; i++)); do [ -s "$DIR/done.json" ] && break; sleep 1; done
+[ -s "$DIR/done.json" ] || { echo "timeout after ${TIMEOUT}s; child still running in window $WIN" >&2; exit 2; }
+
+# 7. surface the result: session id, transcript, and the child's last message
+python3 - "$DIR/done.json" <<'PY'
+import json, sys
+ev = json.load(open(sys.argv[1]))
+print("child session:", ev.get("session_id"))
+print("transcript:   ", ev.get("transcript_path"))
+print("--- child's last message ---")
+print(ev.get("last_assistant_message") or "(none in Stop event; read the transcript)")
+PY
