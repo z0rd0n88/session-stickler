@@ -30,4 +30,6 @@ session-switcher handoff.md [workdir]
 
 - One brief in, first reply out. For a running conversation, attach to the tmux window.
 - `Stop` fires every turn; `done.json` holds the latest one.
+- The brief is a command-line argument, so any process of the same user can read it from `/proc`. Fine on a single-user box; for secrets, put a file path in the brief instead of the secret.
+- A folder the child has never opened shows Claude's trust dialog. The script answers it only when the workdir is the parent's own directory; otherwise it times out and you attach to answer by hand.
 - Exit 2 means timeout; the child is still running.
