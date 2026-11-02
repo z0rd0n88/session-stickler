@@ -1,6 +1,8 @@
-# session-switcher
+# session-stickler
 
 **Hand work from one Claude Code session to a fresh one, get its reply back, and keep a fleet of background sessions steerable and inside your RAM budget. Built from `claude`, `tmux`, and a shell.**
+
+> The repository is **session-stickler**. Its handoff command keeps the name `session-switcher`, alongside `session-relay` and `session-airspace`.
 
 ![Bash](https://img.shields.io/badge/bash-strict%20mode-4EAA25?logo=gnubash&logoColor=white)
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20WSL2-informational?logo=linux&logoColor=white)
@@ -119,13 +121,13 @@ flowchart LR
 ## Install
 
 ```bash
-git clone https://github.com/z0rd0n88/session-switcher ~/session-switcher
-export PATH="$HOME/session-switcher/bin:$PATH"       # add to your shell rc
+git clone https://github.com/z0rd0n88/session-stickler ~/session-stickler
+export PATH="$HOME/session-stickler/bin:$PATH"       # add to your shell rc
 
 # Optional: let Claude Code discover the skills
 mkdir -p ~/.claude/skills
 for s in session-switcher session-relay session-airspace; do
-  ln -s ~/session-switcher/skills/$s ~/.claude/skills/$s
+  ln -s ~/session-stickler/skills/$s ~/.claude/skills/$s
 done
 ```
 
@@ -184,7 +186,7 @@ These trade-offs are deliberate and documented in the code and skills:
 ## Repository layout
 
 ```text
-session-switcher/
+session-stickler/
 ├── bin/
 │   ├── session-switcher      # spawn a child session, return its first reply
 │   ├── session-relay         # list / send / read / kill tmux-hosted sessions
