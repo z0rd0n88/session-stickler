@@ -41,7 +41,7 @@ PONG
 |---|---|---|
 | [`bin/session-switcher`](bin/session-switcher) | Start a new Claude Code session in tmux with a brief, wait for its first turn, and print the reply | `session-switcher <brief.md> [workdir]`<br>env: `CLAUDE_FLAGS`, `SWITCH_TIMEOUT` (90s), `SWITCH_SESSION` (`handoff`) |
 | [`bin/session-relay`](bin/session-relay) | Inspect and steer background sessions without a TTY or `tmux attach` | `list` · `send <window> "<prompt>"` · `read <window> [lines=25]` · `kill <window>` |
-| [`bin/session-airspace`](bin/session-airspace) | Pause the largest sessions under memory pressure and resume them when memory frees up | `status` · `hold <pid\|window>` · `release <pid\|window>` · `guard [threshold=85] [interval=5]` · `guard --once` |
+| [`bin/session-airspace`](bin/session-airspace) | Pause the largest sessions under memory pressure and resume them when memory frees up | `status` · `hold <pid\|window>` · `release <pid\|window>` · `guard [--threshold 85] [--interval 5] [--once]` |
 
 All three tools work on the same tmux session (`$SWITCH_SESSION`, default `handoff`). That shared session is how they cooperate.
 
@@ -100,7 +100,7 @@ flowchart LR
 ```
 
 - **`session-relay`** takes a window index or name. It types prompts into a pane with `tmux send-keys` and reads output with `tmux capture-pane`. `list` shows the last non-blank line of each pane as a 60-character preview.
-- **`session-airspace`** uses the airspace metaphor. A process in state `T` is **HOLDING**; anything else is **FLYING**. `guard` gets system RAM from `MemTotal − MemAvailable`. At or above the threshold, it `SIGSTOP`s the FLYING window with the highest RSS. At 10 points or more below the threshold, it `SIGCONT`s one HOLDING window. It takes at most one action per tick, and the 10-point gap keeps it from flapping between hold and release.
+- **`session-airspace`** uses the airspace metaphor. A process in state `T` is **HOLDING**; anything else is **FLYING**. `guard` gets system RAM from `MemTotal − MemAvailable`. At or above the threshold, it `SIGSTOP`s the FLYING window with the highest RSS. At 10 points or more below the threshold, it `SIGCONT`s one HOLDING window. It takes at most one action per tick, and the 10-point gap keeps it from flapping between hold and release. Its flags are validated before the first tick: the threshold must be an integer from 1 to 100 and the interval a positive number of seconds, so a typo fails fast instead of running with a nonsense threshold.
 
 ## Engineering highlights
 
@@ -160,8 +160,9 @@ session-relay kill 1
 session-airspace status            # system RAM + per-window FLYING/HOLDING and RSS
 session-airspace hold 2            # SIGSTOP window 2 (or pass a PID)
 session-airspace release 2         # SIGCONT
-session-airspace guard 85 5        # watch continuously: threshold 85%, check every 5s
-session-airspace guard --once      # a single check at the default 85% threshold
+session-airspace guard --threshold 85 --interval 5   # watch continuously: 85%, check every 5s
+session-airspace guard 85 5                          # same, positional form
+session-airspace guard --threshold 90 --once         # a single check at 90%, then exit
 ```
 
 ## Skills
