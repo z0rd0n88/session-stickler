@@ -7,7 +7,8 @@
 #   session-airspace status                  Show memory usage and session holding states
 #   session-airspace hold <pid|window>       Place a session into holding pattern (SIGSTOP)
 #   session-airspace release <pid|window>    Clear a session to resume execution (SIGCONT)
-#   session-airspace guard [--threshold 85]  Auto-monitor and manage memory pressure
+#   session-airspace guard [--threshold 85] [--interval 5] [--once]
+#                                            Auto-monitor and manage memory pressure
 #
 set -euo pipefail
 
@@ -101,13 +102,42 @@ cmd_release() {
   echo "Cleared PID $pid ($target) to FLY (SIGCONT)"
 }
 
+guard_usage() {
+  echo "usage: session-airspace guard [--threshold PCT] [--interval SECS] [--once]" >&2
+  echo "       session-airspace guard [PCT] [SECS] [--once]" >&2
+}
+
 cmd_guard() {
-  local threshold="${1:-85}"
-  local interval="${2:-5}"
+  local threshold=85
+  local interval=5
   local once=0
-  if [ "${3:-}" = "--once" ] || [ "${1:-}" = "--once" ]; then
-    once=1
-    threshold=85
+  local positional=()
+
+  # Flags may appear in any order; bare numbers are accepted positionally
+  # (threshold, then interval) for backward compatibility.
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --threshold)   [ "$#" -ge 2 ] || { guard_usage; exit 1; }; threshold="$2"; shift 2 ;;
+      --threshold=*) threshold="${1#*=}"; shift ;;
+      --interval)    [ "$#" -ge 2 ] || { guard_usage; exit 1; }; interval="$2"; shift 2 ;;
+      --interval=*)  interval="${1#*=}"; shift ;;
+      --once)        once=1; shift ;;
+      -h|--help)     guard_usage; exit 0 ;;
+      -*)            echo "Unknown guard option: $1" >&2; guard_usage; exit 1 ;;
+      *)             positional+=("$1"); shift ;;
+    esac
+  done
+  if [ "${#positional[@]}" -gt 2 ]; then
+    echo "Too many arguments to guard: ${positional[*]}" >&2; guard_usage; exit 1
+  fi
+  [ "${#positional[@]}" -ge 1 ] && threshold="${positional[0]}"
+  [ "${#positional[@]}" -ge 2 ] && interval="${positional[1]}"
+
+  if ! [[ "$threshold" =~ ^[0-9]+$ ]] || [ "$threshold" -lt 1 ] || [ "$threshold" -gt 100 ]; then
+    echo "Invalid threshold '$threshold': expected an integer percentage from 1 to 100" >&2; exit 1
+  fi
+  if ! [[ "$interval" =~ ^[0-9]+$ ]] || [ "$interval" -lt 1 ]; then
+    echo "Invalid interval '$interval': expected a whole number of seconds (1 or more)" >&2; exit 1
   fi
 
   echo "Airspace Guard active. Watching RAM (Threshold: ${threshold}%)..."
@@ -159,9 +189,9 @@ case "${1:-}" in
   status) cmd_status ;;
   hold)   shift; cmd_hold "${1:-}" ;;
   release) shift; cmd_release "${1:-}" ;;
-  guard)  shift; cmd_guard "${1:-85}" "${2:-5}" "${3:-}" ;;
+  guard)  shift; cmd_guard "$@" ;;
   -h|--help|"")
-    sed -n 2,10p "$0"
+    sed -n 2,11p "$0"
     exit 0
     ;;
   *)

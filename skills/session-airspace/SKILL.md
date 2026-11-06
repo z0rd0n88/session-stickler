@@ -19,8 +19,11 @@ session-airspace hold 1
 # Resume a paused session (SIGCONT)
 session-airspace release 1
 
-# Guard against OOM: automatically hold largest sessions if RAM > 85%
-session-airspace guard --threshold 85
+# Guard against OOM: hold the largest session while RAM >= 85%, check every 5s
+session-airspace guard --threshold 85 --interval 5
+
+# One check and exit (respects --threshold); positional `guard 85 5` also works
+session-airspace guard --threshold 90 --once
 ```
 
 ## States
