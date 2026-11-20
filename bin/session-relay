@@ -1,92 +1,129 @@
 #!/usr/bin/env bash
-# session-relay: Headless and Desktop-friendly terminal bridge for Claude Code sessions.
-# Allows sending follow-up prompts, inspecting live terminal output, and listing active
-# sessions without requiring an interactive TTY or `tmux attach`.
+# session-relay: see and steer the Claude children that session-switcher (or run-job) started,
+# without a TTY or `tmux attach`. Works the same from a terminal and from Claude Desktop.
 #
 # Commands:
-#   session-relay list                       List managed sessions and latest status
-#   session-relay send <window> "<prompt>"   Send a message directly into an agent pane
-#   session-relay read <window> [lines]      Read recent terminal lines from a session
-#   session-relay kill <window>              Close an agent session window
+#   session-relay list                          One line per child: target, state, memory, last reply
+#   session-relay send <target> [--wait[=SECS]] <prompt|-f file|->
+#                                               Type a prompt into a child; --wait prints its reply
+#   session-relay last <target>                 Print the child's last full reply (from done.json)
+#   session-relay read <target> [lines]         Print the last N lines of the child's screen (25)
+#   session-relay kill <target>                 Close a child (resumes it first if it is held)
 #
+# <target> is the window name session-switcher prints (sw-ab12cd), "session:index" from
+# `list`, or a bare window index in $SWITCH_SESSION (default handoff).
+# env: SWITCH_SESSION=handoff   RELAY_WAIT=600 (default --wait seconds)
 set -euo pipefail
 
-TMUX_SESSION="${SWITCH_SESSION:-handoff}"
+LIB="$(cd "$(dirname "$(readlink -f "$0")")/../lib" && pwd)"
+# shellcheck source=lib/session-common.sh
+. "$LIB/session-common.sh"
 
-resolve_window() {
-  local target="$1"
-  if tmux list-windows -t "$TMUX_SESSION" -F "#{window_index}" 2>/dev/null | grep -qx "$target"; then
-    echo "$TMUX_SESSION:$target"
-    return 0
-  fi
-  if tmux list-windows -t "$TMUX_SESSION" -F "#{window_name}" 2>/dev/null | grep -qx "$target"; then
-    echo "$TMUX_SESSION:$target"
-    return 0
-  fi
-  echo "Error: window '$target' not found in tmux session '$TMUX_SESSION'" >&2
-  return 1
-}
+usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; }
 
 cmd_list() {
-  if ! command -v tmux >/dev/null || ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
-    echo "No active sessions in tmux session '$TMUX_SESSION'."
+  local rows
+  rows=$(managed_rows)
+  if [ -z "$rows" ]; then
+    echo "No Claude children found in any tmux session."
     return 0
   fi
-
-  printf "%-8s %-10s %-8s %s\n" "WINDOW" "NAME" "PID" "LATEST PREVIEW"
-  printf "%-8s %-10s %-8s %s\n" "------" "----" "---" "--------------"
-
-  while read -r win_idx win_name pane_pid; do
-    local preview
-    preview=$(tmux capture-pane -p -t "$TMUX_SESSION:$win_idx" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n 1 | tr '\n' ' ' | cut -c 1-60)
-    printf "%-8s %-10s %-8s %s\n" "$win_idx" "$win_name" "$pane_pid" "$preview"
-  done < <(tmux list-windows -t "$TMUX_SESSION" -F "#{window_index} #{window_name} #{pane_pid}")
+  printf "%-14s %-10s %-9s %6s %6s %6s  %s\n" TARGET NAME STATE RSS AGE QUIET LAST
+  while IFS=$'\t' read -r target name _ _ _ state rss age quiet _ last; do
+    printf "%-14s %-10s %-9s %5sM %6s %6s  %s\n" "$target" "$name" "$state" "$rss" \
+      "$(human_age "$age")" "$(human_age "$quiet")" "$last"
+  done <<<"$rows"
 }
 
 cmd_send() {
-  local target="${1:-}"
-  local msg="${2:-}"
-  [ -n "$target" ] && [ -n "$msg" ] || { echo "Usage: session-relay send <window> \"<prompt>\"" >&2; exit 1; }
+  local target="" wait="" text="" have_text=0 file=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --wait)    wait="${RELAY_WAIT:-600}"; shift ;;
+      --wait=*)  wait="${1#*=}"; shift ;;
+      -f)        [ "$#" -ge 2 ] || { echo "error: -f needs a file" >&2; exit 1; }; file="$2"; shift 2 ;;
+      -)         text=$(cat); have_text=1; shift ;;
+      *)
+        if [ -z "$target" ]; then target="$1"
+        elif [ "$have_text" -eq 0 ]; then text="$1"; have_text=1
+        else echo "error: put the prompt in one quoted argument" >&2; exit 1; fi
+        shift ;;
+    esac
+  done
+  [ -n "$file" ] && { text=$(cat "$file"); have_text=1; }
+  [ -n "$target" ] && [ "$have_text" -eq 1 ] && [ -n "$text" ] \
+    || { echo 'usage: session-relay send <target> [--wait[=SECS]] "<prompt>" | -f file | -' >&2; exit 1; }
+  [ -z "$wait" ] || [[ "$wait" =~ ^[0-9]+$ ]] || { echo "error: --wait takes whole seconds" >&2; exit 1; }
 
-  local win
-  win=$(resolve_window "$target")
-  tmux send-keys -t "$win" "$msg" Enter
-  echo "Relayed prompt to $win:"
-  echo "  $msg"
+  resolve_target "$target"
+  if [ "$T_STATE" = held ]; then
+    echo "error: $T_TARGET is held by session-airspace; run: session-airspace release $T_TARGET" >&2
+    exit 3
+  fi
+
+  local done_file="$T_DIR/done.json" before=""
+  before=$(stat -c "%y %s" "$done_file" 2>/dev/null || true)
+
+  # Paste, don't type: send-keys would read words like "Enter" or "C-c" as key names, and a
+  # newline would submit half a prompt. paste-buffer -p wraps the text in bracketed-paste
+  # markers when the pane asked for them (Claude Code does), so newlines stay in the prompt.
+  local buf="relay-$$"
+  printf '%s' "$text" | tmux load-buffer -b "$buf" -
+  tmux paste-buffer -p -d -b "$buf" -t "$T_TARGET"
+  sleep 0.5   # let the TUI finish taking the paste before the submitting Enter
+  tmux send-keys -t "$T_TARGET" Enter
+  echo "sent to $T_TARGET ($T_NAME): $(printf '%s' "$text" | head -c 120 | tr '\n' ' ')"
+
+  [ -n "$wait" ] || return 0
+  local i now
+  for ((i = 0; i < wait; i++)); do
+    now=$(stat -c "%y %s" "$done_file" 2>/dev/null || true)
+    if [ -n "$now" ] && [ "$now" != "$before" ] && [ -s "$done_file" ]; then
+      sleep 0.2   # the hook writes done.json with `cat >`; give it a moment to finish
+      echo "--- reply from $T_TARGET ---"
+      python3 "$LIB/session_panes.py" last "$done_file" || echo "(no message in Stop event; see: session-relay read $T_TARGET)"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "timeout after ${wait}s; $T_TARGET is still working. Check later: session-relay last $T_TARGET" >&2
+  exit 2
+}
+
+cmd_last() {
+  resolve_target "${1:-}"
+  python3 "$LIB/session_panes.py" last "$T_DIR/done.json" \
+    || { echo "$T_TARGET has not finished a turn yet (state: $T_STATE)" >&2; exit 1; }
 }
 
 cmd_read() {
-  local target="${1:-}"
   local lines="${2:-25}"
-  [ -n "$target" ] || { echo "Usage: session-relay read <window> [lines]" >&2; exit 1; }
-
-  local win
-  win=$(resolve_window "$target")
-  echo "=== Output from $win (tail $lines lines) ==="
-  tmux capture-pane -p -t "$win" | tail -n "$lines"
+  [[ "$lines" =~ ^[0-9]+$ ]] || { echo "error: lines must be a number" >&2; exit 1; }
+  resolve_target "${1:-}"
+  echo "=== $T_TARGET ($T_NAME, $T_STATE) — last $lines lines ==="
+  # -J joins wrapped lines; -S reaches into scrollback so `lines` can exceed the screen height.
+  tmux capture-pane -p -J -S "-$lines" -t "$T_TARGET" | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' | tail -n "$lines"
 }
 
 cmd_kill() {
-  local target="${1:-}"
-  [ -n "$target" ] || { echo "Usage: session-relay kill <window>" >&2; exit 1; }
-
-  local win
-  win=$(resolve_window "$target")
-  tmux kill-window -t "$win"
-  echo "Closed session window: $win"
+  resolve_target "${1:-}"
+  [ "$T_STATE" = held ] && release_tree "$T_CLAUDE"   # a stopped process cannot act on SIGHUP
+  tmux kill-window -t "$T_TARGET"
+  # claude exits on the hangup but takes a few seconds to shut down; wait so the caller knows.
+  local i
+  for ((i = 0; i < 15; i++)); do
+    [ -d "/proc/$T_CLAUDE" ] && [ "$(proc_state "$T_CLAUDE")" != Z ] || { echo "closed $T_TARGET ($T_NAME)"; return 0; }
+    sleep 1
+  done
+  echo "closed window $T_TARGET, but claude (pid $T_CLAUDE) is still shutting down after 15s" >&2
 }
 
 case "${1:-}" in
-  list)   cmd_list ;;
-  send)   shift; cmd_send "${1:-}" "${2:-}" ;;
-  read)   shift; cmd_read "${1:-}" "${2:-25}" ;;
-  kill)   shift; cmd_kill "${1:-}" ;;
-  -h|--help|"")
-    sed -n 2,10p "$0"
-    exit 0
-    ;;
-  *)
-    echo "Unknown command: $1" >&2
-    exit 1
-    ;;
+  list) cmd_list ;;
+  send) shift; cmd_send "$@" ;;
+  last) shift; cmd_last "${1:-}" ;;
+  read) shift; cmd_read "${1:-}" "${2:-25}" ;;
+  kill) shift; cmd_kill "${1:-}" ;;
+  -h|--help|help|"") usage ;;
+  *) echo "unknown command: $1" >&2; usage >&2; exit 1 ;;
 esac
