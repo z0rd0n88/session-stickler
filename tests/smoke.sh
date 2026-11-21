@@ -17,7 +17,11 @@ ok()  { echo "  ok   $1"; pass=$((pass + 1)); }
 bad() { echo "  FAIL $1"; fail=$((fail + 1)); }
 check() { local name=$1; shift; if "$@" >/dev/null 2>&1; then ok "$name"; else bad "$name"; fi; }
 state_of() { awk '/^State:/ {print $2}' "/proc/$1/status" 2>/dev/null; }
-cleanup() { tmux kill-server 2>/dev/null; tmux -L blast-off-smoke kill-server 2>/dev/null; rm -rf "$WORK"; }
+cleanup() {
+  tmux kill-server 2>/dev/null
+  tmux -L blast-off-smoke kill-server 2>/dev/null; tmux -L run-job-smoke kill-server 2>/dev/null
+  rm -rf "$WORK"
+}
 trap cleanup EXIT
 
 cd "$WORK" || exit 1
@@ -133,6 +137,32 @@ out=$(session-airspace hold --force "$C1" 2>&1)
 check "release on its server" session-airspace release "$C1"
 check "a bare index never reaches another server" bash -c "! SWITCH_SESSION=job-smoke session-relay last 1"
 check "default/ prefix resolves a default-server child" bash -c "session-relay last default/\$(session-relay list | awk -v a=$A '\$2 == a {print \$1}')"
+
+# run-job (big-next-job) copies blast-off's private server: -L run-job-<name>, session job-<name>,
+# a job.XXXXXX dir, Stop + StopFailure hooks, and `claude ...; echo $? > <dir>/exit` in the window.
+echo "run-job children (private tmux server)"
+RJ=run-job-smoke
+tmux -f /dev/null -L $RJ new-session -d -s job-smoke -c "$WORK"
+tmux -L $RJ set-option -g remain-on-exit on
+R=$(mktemp -d "$XDG_RUNTIME_DIR/job.XXXXXX")
+printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"cat > %s/done.tmp && mv %s/done.tmp %s/done.json"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"cat > %s/failed.tmp && mv %s/failed.tmp %s/failed.json"}]}]}}\n' \
+  "$R" "$R" "$R" "$R" "$R" "$R" > "$R/settings.json"
+tmux -L $RJ new-window -d -t job-smoke -c "$WORK" "claude --settings $R/settings.json 'run-job prompt'; echo \$? > $R/exit"
+# A socket file with no server behind it (a crashed server leaves one) must be skipped quietly.
+python3 -c 'import socket, sys; s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.close()' "$TMUX_TMPDIR/tmux-$(id -u)/stale-smoke"
+sleep 2
+err=$(session-relay list 2>&1 >/dev/null)
+[ -z "$err" ] && ok "a stale socket is skipped quietly" || { bad "a stale socket is skipped quietly"; echo "$err"; }
+list=$(session-relay list)
+RT=$(awk -v s="$RJ/job-smoke:" 'index($1, s) == 1 {print $1}' <<<"$list")
+[ -n "$RT" ] && grep -q "^$RT .* run-job .*idle .*echo: run-job prompt" <<<"$list" && ok "list shows a run-job child ($RT) with its runner" || { bad "list shows a run-job child with its runner"; echo "$list"; }
+reply=$(session-relay send "$RT" --wait=15 'no force needed' 2>&1)
+grep -q 'echo: no force needed' <<<"$reply" && ok "send reaches a run-job child without --force" || { bad "send reaches a run-job child without --force"; echo "$reply"; }
+rpid=$(python3 "$ROOT/lib/session_panes.py" list | awk -F'\t' -v c="$RT" '$1 == c {print $4}')
+session-airspace hold "$RT" >/dev/null 2>&1
+[ "$(state_of "$rpid")" = T ] && ok "hold works on a run-job child" || bad "hold works on a run-job child (state $(state_of "$rpid"))"
+out=$(session-relay kill "$RT" 2>&1); rc=$?
+[ "$rc" -eq 0 ] && grep -q 'treats a killed child as a crash' <<<"$out" && ok "kill closes a run-job child, with a warning" || { bad "kill closes a run-job child, with a warning (rc $rc)"; echo "$out"; }
 
 echo
 echo "$pass passed, $fail failed"

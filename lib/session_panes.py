@@ -201,7 +201,7 @@ def runner_of(socket, sess, sdir):
         return "blast-off"
     if base.startswith("switch."):
         return "switcher"
-    if sess.startswith("job-"):
+    if socket.startswith("run-job-") or sess.startswith("job-"):
         return "run-job"
     return "other"
 
@@ -218,6 +218,7 @@ def cmd_list():
             return
         except subprocess.TimeoutExpired:
             continue
+        # A stale socket (no server behind it) just yields no rows: its error went to the pipe.
         for row in out.splitlines():
             parts = row.split("\t")
             if len(parts) != 5 or not parts[3].isdigit():

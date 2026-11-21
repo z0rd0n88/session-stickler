@@ -11,7 +11,8 @@
 #   session-relay last <target>                 Print the child's last full reply (from done.json)
 #   session-relay read <target> [lines]         Print the last N lines of the child's screen (25)
 #   session-relay kill <target>                 Close a child (resumes it first if it is held).
-#                                               Refused for blast-off: use `blast-off stop <job-dir>`
+#                                               Refused for blast-off: use `blast-off stop <job-dir>`.
+#                                               Warns for run-job: it starts the next child
 #
 # <target> is the TARGET column of `list`: "session:index" on the default tmux server,
 # "socket/session:index" on another (blast-off: blast-off-<job>/job-<job>:3). The window name
@@ -127,6 +128,9 @@ cmd_kill() {
     echo "error: $T_TARGET is a blast-off child; closing its window makes the runner treat it as" \
          "dead and launch another. Stop the job instead: $(blast_off_stop_hint)" >&2
     exit 4
+  fi
+  if [ "$T_RUNNER" = run-job ]; then
+    echo "warning: $T_TARGET is a run-job child; run-job treats a killed child as a crash and starts the next one" >&2
   fi
   [ "$T_STATE" = held ] && release_tree "$T_CLAUDE"   # a stopped process cannot act on SIGHUP
   tm kill-window -t "$T_PANE_ID"

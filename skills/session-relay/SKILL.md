@@ -5,7 +5,7 @@ description: See and steer Claude child sessions started by session-switcher, bi
 
 # Session Relay
 
-Talks to the Claude children that `session-switcher` (tmux session `handoff`), `run-job` (sessions `job-*`) and blast-off (a private tmux server per job, `-L blast-off-<job>`) start. It finds them in every session on every tmux server you own, so one `list` shows them all, with a RUNNER column. Everything works without a TTY.
+Talks to the Claude children that `session-switcher` (tmux session `handoff`), `run-job` (its own server `-L run-job-<name>`, session `job-<name>`) and blast-off (a private tmux server per job, `-L blast-off-<job>`) start. It finds them in every session on every tmux server you own, so one `list` shows them all, with a RUNNER column. Everything works without a TTY.
 
 ## Commands
 
@@ -27,6 +27,10 @@ blast-off's runner drives its children from the job's brief and closes each wind
 - `list`, `read`, `last`: as for any child.
 - `send` refuses (exit 4) without `--force`: a typed prompt can derail the job. Send only when the user asks you to steer that child.
 - `kill` refuses (exit 4): the runner would treat the closed window as a dead child and start another. Stop the job with the `blast-off stop <job-dir>` command it prints.
+
+## run-job children
+
+Every command works as usual. `kill` warns: run-job treats a killed child as a crash and starts the next one, so close one only when that is what you want.
 
 ## Steps for a follow-up
 
