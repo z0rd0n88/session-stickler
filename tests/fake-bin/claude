@@ -4,6 +4,7 @@
 on the hook's stdin. Then it answers each prompt typed into its pane the same way.
 
 env: FAKE_MB=0 (memory to hold, to give children different sizes)  FAKE_DELAY=0.5 (seconds per reply)
+     FAKE_FAIL=<error> (end the first turn through the StopFailure hook instead, as an API error does)
 It also starts one `sleep` child, so holds can be checked across a process tree."""
 import json
 import os
@@ -14,7 +15,9 @@ import time
 args = sys.argv[1:]
 settings = args[args.index("--settings") + 1]
 prompt = args[-1]
-hook = json.load(open(settings))["hooks"]["Stop"][0]["hooks"][0]["command"]
+hooks = json.load(open(settings))["hooks"]
+hook = hooks["Stop"][0]["hooks"][0]["command"]
+fail = os.environ.get("FAKE_FAIL")
 transcript = os.path.join(os.path.dirname(settings), "fake-transcript.jsonl")
 ballast = bytearray(int(os.environ.get("FAKE_MB", "0")) * 1024 * 1024)
 for i in range(0, len(ballast), 4096):
@@ -23,21 +26,27 @@ helper = subprocess.Popen(["sleep", "100000"])
 delay = float(os.environ.get("FAKE_DELAY", "0.5"))
 
 
-def answer(text):
+def answer(text, error=None):
     with open(transcript, "a") as f:
         f.write(json.dumps({"type": "user", "text": text}) + "\n")
     for _ in range(int(delay * 10)):   # small steps, so time spent held is lost, as with real work
         time.sleep(0.1)
-    reply = "echo: " + text
-    print(reply, flush=True)
-    event = {"session_id": "fake", "transcript_path": transcript, "last_assistant_message": reply}
-    subprocess.run(hook, shell=True, input=json.dumps(event), text=True, check=False)
+    if error:
+        print("API Error: " + error, flush=True)
+        event = {"session_id": "fake", "transcript_path": transcript, "error": error}
+        cmd = hooks["StopFailure"][0]["hooks"][0]["command"]
+    else:
+        reply = "echo: " + text
+        print(reply, flush=True)
+        event = {"session_id": "fake", "transcript_path": transcript, "last_assistant_message": reply}
+        cmd = hook
+    subprocess.run(cmd, shell=True, input=json.dumps(event), text=True, check=False)
 
 
 # Ask for bracketed paste, as Claude Code does: a paste then arrives between ESC[200~ and ESC[201~,
 # and newlines inside it belong to the prompt instead of submitting it.
 print("\x1b[?2004hfake claude ready", flush=True)
-answer(prompt)
+answer(prompt, fail)
 START, END = "\x1b[200~", "\x1b[201~"
 pending, in_paste = "", False
 while True:

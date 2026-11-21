@@ -46,10 +46,10 @@ sent to handoff:1 (sw-Xa91Qd): Now run the tests and summarise failures
 | Tool | Purpose | Interface |
 |---|---|---|
 | [`bin/session-switcher`](bin/session-switcher) | Start a new Claude Code session in tmux with a brief, wait for its first turn, and print the reply | `session-switcher <brief.md> [workdir]`<br>env: `CLAUDE_FLAGS`, `SWITCH_TIMEOUT` (90s), `SWITCH_SESSION` (`handoff`), `SWITCH_RAM_WARN` (85) |
-| [`bin/session-relay`](bin/session-relay) | See and steer child sessions without a TTY or `tmux attach` | `list` · `send <target> [--wait[=SECS]] "<prompt>"` · `last <target>` · `read <target> [lines=25]` · `kill <target>` |
-| [`bin/session-airspace`](bin/session-airspace) | Hold the largest children under memory pressure and release them when memory frees up | `status` · `hold <target>` · `release <target>` · `guard [--threshold 85] [--interval 5] [--once]` |
+| [`bin/session-relay`](bin/session-relay) | See and steer child sessions without a TTY or `tmux attach` | `list` · `send <target> [--wait[=SECS]] [--force] "<prompt>"` · `last <target>` · `read <target> [lines=25]` · `kill <target>` |
+| [`bin/session-airspace`](bin/session-airspace) | Hold the largest children under memory pressure and release them when memory frees up | `status` · `hold [--force] <target>` · `release <target>` · `guard [--threshold 85] [--interval 5] [--once]` |
 
-A `<target>` is the window name `session-switcher` prints (`sw-Xa91Qd`), a `session:index` from `session-relay list`, or a bare window index in `$SWITCH_SESSION`. `session-relay` and `session-airspace` find children in **every** tmux session by their return channel (`claude --settings <dir>/settings.json`), so children of big-next-job's `run-job` (`job-*` sessions) show up next to handoffs. Nothing else on the machine can be targeted: a typo or a stray PID is refused.
+A `<target>` is the TARGET column of `session-relay list`: `session:index` on the default tmux server, or `socket/session:index` on another one (a blast-off child is `blast-off-<job>/job-<job>:3`). The window name `session-switcher` prints (`sw-Xa91Qd`) and a bare window index in `$SWITCH_SESSION` (default server only) also work. `session-relay` and `session-airspace` find children in **every** session on **every** tmux server you own (each socket in `${TMUX_TMPDIR:-/tmp}/tmux-$UID/`) by their return channel (`claude --settings <dir>/settings.json`), so children of big-next-job's `run-job` (its private `tmux -L run-job-<name>` servers, or `job-*` sessions in older versions) and of [blast-off](https://github.com/z0rd0n88/blast-off) (its private `tmux -L blast-off-<job>` servers) show up next to handoffs. The RUNNER column says which tool started each one. Nothing else on the machine can be targeted: a typo or a stray PID is refused.
 
 ## How it works
 
@@ -101,13 +101,19 @@ flowchart LR
     H --> W1["window 1: claude"]
     H --> W2["window 2: claude"]
     H --> W3["window N: claude"]
-    R["session-relay<br/>list / send / last / read / kill"] -->|"paste-buffer, capture-pane"| H
-    R -. "reads" .-> D["done.json<br/>(each child's Stop event)"]
+    BO["blast-off runner"] -->|new-window| J[("tmux -L blast-off-&lt;job&gt;<br/>session 'job-&lt;job&gt;'")]
+    J --> W4["window n: systemd-run --scope claude"]
+    R["session-relay<br/>list / send / last / read / kill"] -->|"tmux -L &lt;socket&gt;: paste-buffer, capture-pane"| H
+    R -->|"list, read, last; send --force only"| J
+    R -. "reads" .-> D["done.json / failed.json<br/>(each child's Stop / StopFailure event)"]
     A["session-airspace<br/>status / hold / release / guard"] -->|"SIGSTOP / SIGCONT on claude + its process tree"| H
     A -. "reads" .-> M["/proc/meminfo<br/>/proc/PID/status"]
 ```
 
-- **`session-relay`** reads each child's `done.json`, the same `Stop` event `session-switcher` waits on. `list` shows one line per child: target, state (`starting`, `working`, `idle`, `held`), memory, age, time since its last activity, and its last reply. `send` pastes the prompt with `tmux paste-buffer -p` (bracketed paste) and then presses Enter, so a multi-line prompt arrives as one message and words like `Enter` or `C-c` arrive as text. `--wait` blocks until the child's next `Stop` event and prints the reply; it exits `2` on timeout. `last` prints the latest full reply, `read` the pane including scrollback, and `kill` closes the window, resumes a held child first, and waits for `claude` to exit.
+- **Discovery.** Both tools ask every tmux server in `${TMUX_TMPDIR:-/tmp}/tmux-$UID/` (`tmux -L <socket> list-panes -a`) and keep the panes whose process tree holds `claude ... --settings <dir>/settings.json`. Every later tmux call goes to that child's own server with `-L <socket>` and its pane id. The runner comes from the server and the dir: a `blast-off-*` socket or a `blast-off-<job>-child.*` dir is **blast-off**, a `switch.*` dir is **switcher**, a `run-job-*` socket or any other child in a `job-*` session is **run-job**, the rest **other**. A socket file with no server behind it is skipped quietly.
+- **run-job children** take every command without `--force`. `kill` warns that run-job treats a killed child as a crash and starts the next one. `hold` is fine: run-job stops its timeout clock while a child is held.
+- **blast-off children belong to their runner.** It feeds each child the job's brief, waits for its `done.json` or `failed.json`, then closes the window and deletes the dir, so a blast-off child is normally listed only while it works (unless `JOB_KEEP_WINDOWS`). `list`, `read` and `last` work as for any child. `send` refuses (exit `4`) unless you pass `--force`, because a typed prompt can derail the job. `kill` refuses (exit `4`) and prints `blast-off stop <job-dir>`: a closed window looks like a dead child to the runner, which logs it and starts another. `session-airspace hold` refuses unless `--force`, and `guard` never holds one, because blast-off times a child with wall-clock seconds (`JOB_CHILD_TIMEOUT`, default 2 h): time held still counts, and a child that runs out is killed and replaced, losing its work. `blast-off.slice` already caps those children's memory (`MemoryHigh`, `MemoryMax`, systemd-oomd).
+- **`session-relay`** reads each child's `done.json`, the same `Stop` event `session-switcher` waits on, and `failed.json`, which blast-off's `StopFailure` hook writes when an API error ends a turn. `list` shows one line per child: target, runner, state (`starting`, `working`, `idle`, `failed`, `held`), memory, age, time since its last activity, and its last reply (or the failure). `send` pastes the prompt with `tmux paste-buffer -p` (bracketed paste) and then presses Enter, so a multi-line prompt arrives as one message and words like `Enter` or `C-c` arrive as text. `--wait` blocks until the child's next `Stop` (or `StopFailure`) event and prints the reply; it exits `2` on timeout. `last` prints the latest full reply, `read` the pane including scrollback, and `kill` closes the window, resumes a held child first, and waits for `claude` to exit.
 - **`session-airspace`** uses the airspace metaphor. A child whose `claude` is in state `T` is **HOLDING**; anything else is **FLYING**. `hold` stops `claude` and every process under it (Bash-tool commands, MCP servers), parents first; `release` resumes them, children first. `guard` gets system RAM from `MemTotal − MemAvailable`. At or above the threshold, it holds the flying child with the largest total RSS, but always leaves one child flying so the fleet keeps moving. At 10 points or more below the threshold, it releases one child it held itself; a hold you placed by hand stays until you release it. On `Ctrl-C` or `SIGTERM` it releases its own holds. It takes at most one action per tick, and the 10-point gap keeps it from flapping. Children launched before the wrapped-launch change cannot be held; `status` marks them `not holdable`.
 
 ## Engineering highlights
@@ -157,12 +163,17 @@ Write the brief so it stands alone, because the child shares no context with the
 **Steer background sessions (works from Claude Desktop)**
 
 ```bash
-session-relay list                                   # every child: state, memory, last reply
+session-relay list                                   # every child on every tmux server: runner, state, memory, last reply
 session-relay send sw-Xa91Qd --wait "Run pytest and summarize failures"   # prints the reply
 session-relay send sw-Xa91Qd -f followup.md          # prompt from a file (or - for stdin)
 session-relay last sw-Xa91Qd                         # the latest full reply
 session-relay read sw-Xa91Qd 40                      # last 40 lines of its screen
 session-relay kill sw-Xa91Qd
+
+# blast-off children live on the job's own server; the target names it
+session-relay read blast-off-api/job-api:3           # watch it work
+session-relay last blast-off-api/job-api:3           # its last reply, or "turn failed: rate_limit"
+session-relay send --force blast-off-api/job-api:3 "..."   # refused without --force; kill is refused
 ```
 
 A child can end its turn while a command it started keeps running in the background ("waiting for the command to finish"). `--wait` returns at that turn's end; use `last` later for the follow-up reply.
@@ -181,10 +192,10 @@ session-airspace guard --threshold 90 --once         # a single check at 90%, th
 ## Testing
 
 ```bash
-tests/smoke.sh      # 29 checks; prints "29 passed, 0 failed"
+tests/smoke.sh      # 46 checks; prints "46 passed, 0 failed"
 ```
 
-It runs in a private tmux server with a fake `claude` (`tests/fake-bin/claude`), so it needs only `tmux` and `python3` and leaves your real sessions alone. It covers the handoff, every relay command (including multi-line prompts and key names sent as text), holds across a process tree, the guard's hold/release rules, and refusing a target that is not a managed child.
+It runs in a private tmux socket dir with a fake `claude` (`tests/fake-bin/claude`) and a fake `systemd-run` (`tests/fake-bin/systemd-run`, which execs its command as `--scope` does), so it needs only `tmux` and `python3` and leaves your real sessions alone. It also starts a blast-off-style private server (`tmux -f /dev/null -L blast-off-smoke`) and checks listing, `failed`, `read`, `last`, and the `send`/`kill`/`hold`/`guard` rules for blast-off children. It covers the handoff, every relay command (including multi-line prompts and key names sent as text), holds across a process tree, the guard's hold/release rules, and refusing a target that is not a managed child.
 
 ## Skills
 
@@ -203,7 +214,7 @@ These trade-offs are deliberate and documented in the code and skills:
 - **The trust dialog is auto-accepted for one folder only**, the parent's own working directory. Every other folder still needs a human.
 - **Handoff state is private.** The rendezvous directory is created by `mktemp -d` (mode `0700`) under `$XDG_RUNTIME_DIR` when that is set.
 - **`SIGSTOP` has limits.** A held session keeps any git lock or file it holds open until it is released. A held process also keeps its memory: holding stops new allocation and CPU use but frees no RAM (the kernel can swap it out). An open API connection survived 90 seconds held in testing; much longer holds are untested.
-- **`session-relay send` writes into the pane as if you typed it**, so only send prompts you would type yourself. It refuses a held child, since nothing would read the prompt.
+- **`session-relay send` writes into the pane as if you typed it**, so only send prompts you would type yourself. It refuses a held child, since nothing would read the prompt, and a blast-off child unless you pass `--force`.
 
 ## Repository layout
 

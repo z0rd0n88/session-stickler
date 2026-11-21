@@ -4,15 +4,20 @@
 #
 # Commands:
 #   session-airspace status                     RAM, then each child: FLYING/HOLDING, memory
-#   session-airspace hold <target>              Freeze a child and every process under it
+#   session-airspace hold [--force] <target>    Freeze a child and every process under it.
+#                                               A blast-off child needs --force (see below)
 #   session-airspace release <target>           Resume it
 #   session-airspace guard [--threshold 85] [--interval 5] [--once]
 #                                               At >= threshold, hold the largest flying child;
-#                                               at <= threshold-10, release one child it held
+#                                               at <= threshold-10, release one child it held.
+#                                               It never holds a blast-off child
 #
-# <target> is a window name (sw-ab12cd), "session:index" from `session-relay list`, or a bare
+# <target> is the TARGET column of `session-relay list` ("session:index", or
+# "socket/session:index" off the default tmux server), a window name (sw-ab12cd), or a bare
 # window index in $SWITCH_SESSION (default handoff). Only Claude children resolve; PIDs do not.
 # A hold stops growth; it does not free memory already in use (the kernel can swap it out).
+# blast-off times each child with wall-clock seconds (JOB_CHILD_TIMEOUT, default 2 h), so time
+# held counts against it, and its systemd slice already caps the children's memory.
 set -euo pipefail
 
 LIB="$(cd "$(dirname "$(readlink -f "$0")")/../lib" && pwd)"
@@ -22,7 +27,7 @@ LIB="$(cd "$(dirname "$(readlink -f "$0")")/../lib" && pwd)"
 STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/session-airspace-$(id -u)"
 HELD_FILE="$STATE_DIR/guard-held"   # "<pid> <starttime>" per child the guard itself held
 
-usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # AIRSPACE_TEST_PCT replaces the measured RAM percentage; tests/smoke.sh uses it to simulate pressure.
 ram() {
@@ -42,14 +47,17 @@ cmd_status() {
   read -r used total avail pct < <(ram)
   echo "RAM: ${used}MB used of ${total}MB (${pct}%), ${avail}MB available"
   rows=$(managed_rows)
-  if [ -z "$rows" ]; then echo "No Claude children found in any tmux session."; return 0; fi
+  if [ -z "$rows" ]; then echo "No Claude children found on any tmux server."; return 0; fi
   echo
-  printf "%-14s %-10s %-8s %-8s %6s  %s\n" TARGET NAME PID STATUS RSS NOTE
-  while IFS=$'\t' read -r target name _ cpid wrapped state rss _ _ _ _; do
+  local w
+  w=$(awk -F'\t' 'BEGIN { m = 14 } length($1) > m { m = length($1) } END { print m }' <<<"$rows")
+  printf "%-${w}s %-10s %-9s %-8s %-8s %6s  %s\n" TARGET NAME RUNNER PID STATUS RSS NOTE
+  while IFS=$'\t' read -r target name _ cpid wrapped state rss _ _ _ _ _ runner _ _; do
     local status=FLYING note=""
     [ "$state" = held ] && status=HOLDING
-    [ "$wrapped" = 1 ] || note="not holdable (old launch)"
-    printf "%-14s %-10s %-8s %-8s %5sM  %s\n" "$target" "$name" "$cpid" "$status" "$rss" "$note"
+    if [ "$wrapped" != 1 ]; then note="not holdable (old launch)"
+    elif [ "$runner" = blast-off ]; then note="guard skips (blast-off timeout keeps running)"; fi
+    printf "%-${w}s %-10s %-9s %-8s %-8s %5sM  %s\n" "$target" "$name" "$runner" "$cpid" "$status" "$rss" "$note"
   done <<<"$rows"
 }
 
@@ -65,8 +73,21 @@ do_hold() {   # do_hold <target> <claude_pid> <wrapped>
 }
 
 cmd_hold() {
+  local force=0
+  [ "${1:-}" = --force ] && { force=1; shift; }
+  [ "${2:-}" = --force ] && force=1
   resolve_target "${1:-}"
   [ "$T_STATE" != held ] || { echo "$T_TARGET is already HOLDING"; return 0; }
+  if [ "$T_RUNNER" = blast-off ]; then
+    if [ "$force" -eq 0 ]; then
+      echo "error: $T_TARGET is a blast-off child. Its runner keeps counting JOB_CHILD_TIMEOUT" \
+           "(wall-clock, default 2 h) while it is held, then kills it and starts over, so the" \
+           "held work is lost. blast-off.slice already caps its memory. To pause the whole job:" \
+           "$(blast_off_stop_hint). To hold anyway: session-airspace hold --force $T_TARGET" >&2
+      return 1
+    fi
+    echo "warning: $T_TARGET's JOB_CHILD_TIMEOUT clock keeps running while it is held" >&2
+  fi
   do_hold "$T_TARGET" "$T_CLAUDE" "$T_WRAPPED"
   echo "HOLDING $T_TARGET ($T_NAME, pid $T_CLAUDE, ${T_RSS}MB). Resume: session-airspace release $T_TARGET"
 }
@@ -106,14 +127,15 @@ guard_tick() {
     # Hold the largest flying, holdable child — but always leave one child flying, so the
     # fleet keeps making progress even when the pressure comes from outside it.
     local flying target cpid rss
-    flying=$(awk -F'\t' '$6 != "held"' <<<"$rows" | grep -c . || true)
+    flying=$(awk -F'\t' '$6 != "held"' <<<"$rows" | grep -c . || true)   # blast-off ones count: they make progress
     if [ "$flying" -le 1 ]; then
       echo "[$(date +%T)] RAM ${pct}% >= ${threshold}%: $flying child flying; leaving it running"
       return 0
     fi
-    read -r target cpid rss < <(awk -F'\t' '$6 != "held" && $5 == 1 {print $1, $4, $7}' <<<"$rows" | sort -k3,3nr | head -1) || true
+    # Never a blast-off child: a hold runs out its JOB_CHILD_TIMEOUT (see the header).
+    read -r target cpid rss < <(awk -F'\t' '$6 != "held" && $5 == 1 && $13 != "blast-off" {print $1, $4, $7}' <<<"$rows" | sort -k3,3nr | head -1) || true
     if [ -z "${cpid:-}" ]; then
-      echo "[$(date +%T)] RAM ${pct}% >= ${threshold}%: no holdable child (old launches cannot be held)"
+      echo "[$(date +%T)] RAM ${pct}% >= ${threshold}%: no holdable child (old launches cannot be held; blast-off children are left to their slice)"
       return 0
     fi
     if do_hold "$target" "$cpid" 1; then
@@ -174,7 +196,7 @@ cmd_guard() {
 
 case "${1:-}" in
   status)  cmd_status ;;
-  hold)    shift; cmd_hold "${1:-}" ;;
+  hold)    shift; cmd_hold "$@" ;;
   release) shift; cmd_release "${1:-}" ;;
   guard)   shift; cmd_guard "$@" ;;
   -h|--help|help|"") usage ;;

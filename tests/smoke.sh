@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Smoke test for session-switcher, session-relay and session-airspace. Uses tests/fake-bin/claude,
-# so it needs tmux and python3 but no Claude account. Runs in its own tmux socket; touches nothing else.
+# Smoke test for session-switcher, session-relay and session-airspace. Uses tests/fake-bin/claude
+# (and tests/fake-bin/systemd-run for the blast-off-style children), so it needs tmux and python3 but
+# no Claude account or systemd. Runs in its own tmux socket dir; touches nothing else.
 # Usage: tests/smoke.sh
 # shellcheck disable=SC2015  # `ok` always succeeds, so `test && ok || bad` is a safe if/else here
 set -uo pipefail
@@ -16,7 +17,11 @@ ok()  { echo "  ok   $1"; pass=$((pass + 1)); }
 bad() { echo "  FAIL $1"; fail=$((fail + 1)); }
 check() { local name=$1; shift; if "$@" >/dev/null 2>&1; then ok "$name"; else bad "$name"; fi; }
 state_of() { awk '/^State:/ {print $2}' "/proc/$1/status" 2>/dev/null; }
-cleanup() { tmux kill-server 2>/dev/null; rm -rf "$WORK"; }
+cleanup() {
+  tmux kill-server 2>/dev/null
+  tmux -L blast-off-smoke kill-server 2>/dev/null; tmux -L run-job-smoke kill-server 2>/dev/null
+  rm -rf "$WORK"
+}
 trap cleanup EXIT
 
 cd "$WORK" || exit 1
@@ -85,6 +90,79 @@ bpid=$(python3 "$ROOT/lib/session_panes.py" list | awk -F'\t' -v b="$B" '$2 == b
 check "kill closes a held child" session-relay kill "$B"
 sleep 1
 [ ! -d "/proc/$bpid" ] || [ "$(state_of "$bpid")" = Z ] && ok "its claude process is gone" || bad "its claude process is gone (state $(state_of "$bpid"))"
+
+# blast-off: a private server per job, each child a window running claude under systemd-run --scope,
+# its dir named blast-off-<job>-child.XXXXXX with Stop and StopFailure hooks (blast-off lib/child.sh).
+echo "blast-off children (private tmux server)"
+BO=blast-off-smoke; JOB="$WORK/job"; mkdir -p "$JOB"
+tmux -f /dev/null -L $BO new-session -d -s job-smoke -c "$WORK"
+tmux -L $BO set-option -g remain-on-exit on
+bo_child() {   # bo_child <n> [env...]: launch child <n> the way child_launch does; prints its dir
+  local n=$1 d; shift
+  d=$(mktemp -d "$XDG_RUNTIME_DIR/$BO-child.XXXXXX")
+  sed "s|@DIR@|$d|g" > "$d/settings.json" <<'JSON'
+{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"cat > @DIR@/done.tmp && mv @DIR@/done.tmp @DIR@/done.json"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"cat > @DIR@/failed.tmp && mv @DIR@/failed.tmp @DIR@/failed.json"}]}]}}
+JSON
+  tmux -L $BO new-window -d -t job-smoke -c "$WORK" -e JOB_DIR="$JOB" -e JOB_CHILD="$n" "$@" \
+    "systemd-run --user --scope --quiet --collect --slice=blast-off.slice --unit=$BO-child-$n.scope claude --settings $d/settings.json 'continue the job'; rc=\$?; echo \$rc > $d/exit; exit \$rc"
+  echo "$d"
+}
+bo_child 1 -e FAKE_MB=80 >/dev/null
+bo_child 2 -e FAKE_FAIL=rate_limit >/dev/null
+sleep 3
+list=$(session-relay list)
+C1=$(awk -v s="$BO/job-smoke:" 'index($1, s) == 1 && /echo: continue the job/ {print $1}' <<<"$list")
+C2=$(awk -v s="$BO/job-smoke:" 'index($1, s) == 1 && /failed/ {print $1}' <<<"$list")
+[ -n "$C1" ] && grep -q "^$C1 .* blast-off .*idle" <<<"$list" && ok "list shows a blast-off child ($C1) with its runner" || { bad "list shows a blast-off child with its runner"; echo "$list"; }
+[ -n "$C2" ] && grep -q "^$C2 .* blast-off .*failed .*turn failed: rate_limit" <<<"$list" && ok "list shows failed when failed.json is newest" || { bad "list shows failed"; echo "$list"; }
+grep -q "^smoke:[0-9]* *$A .*switcher .*idle" <<<"$list" && ok "default-server children are still listed (runner switcher)" || { bad "default-server children are still listed"; echo "$list"; }
+check "last works on a blast-off child" bash -c "session-relay last $C1 | grep -qx 'echo: continue the job'"
+check "last reports the failure" bash -c "session-relay last $C2 | grep -q 'turn failed: rate_limit'"
+check "read works on a blast-off child" bash -c "session-relay read $C1 | grep -q 'fake claude ready'"
+out=$(session-relay send "$C1" "hello" 2>&1); rc=$?
+[ "$rc" -eq 4 ] && grep -q -- '--force' <<<"$out" && ok "send refuses a blast-off child without --force" || { bad "send refuses a blast-off child without --force (rc $rc)"; echo "$out"; }
+reply=$(session-relay send "$C1" --force --wait=15 'forced prompt' 2>&1)
+grep -q 'echo: forced prompt' <<<"$reply" && ok "send --force reaches it on its own server" || { bad "send --force reaches it on its own server"; echo "$reply"; }
+out=$(session-relay kill "$C1" 2>&1); rc=$?
+[ "$rc" -eq 4 ] && grep -q "blast-off stop $JOB" <<<"$out" && ok "kill refuses and names blast-off stop <job-dir>" || { bad "kill refuses and names blast-off stop <job-dir> (rc $rc)"; echo "$out"; }
+c1pid=$(python3 "$ROOT/lib/session_panes.py" list | awk -F'\t' -v c="$C1" '$1 == c {print $4}')
+[ -d "/proc/$c1pid" ] && ok "the refused kill left claude running" || bad "the refused kill left claude running"
+check "hold refuses a blast-off child without --force" bash -c "! session-airspace hold $C1"
+check "status marks it skipped by the guard" bash -c "session-airspace status | grep -q \"^$C1 .*guard skips\""
+out=$(AIRSPACE_TEST_PCT=95 session-airspace guard --once 2>&1)
+grep -q "HOLDING smoke:" <<<"$out" && [ "$(state_of "$c1pid")" != T ] && ok "guard holds a smaller default-server child, not the 80MB blast-off one" || { bad "guard skips blast-off children"; echo "$out"; }
+session-airspace release "$A" >/dev/null
+out=$(session-airspace hold --force "$C1" 2>&1)
+[ "$(state_of "$c1pid")" = T ] && grep -q 'JOB_CHILD_TIMEOUT' <<<"$out" && ok "hold --force holds it, with a timeout warning" || { bad "hold --force holds it, with a timeout warning"; echo "$out"; }
+check "release on its server" session-airspace release "$C1"
+check "a bare index never reaches another server" bash -c "! SWITCH_SESSION=job-smoke session-relay last 1"
+check "default/ prefix resolves a default-server child" bash -c "session-relay last default/\$(session-relay list | awk -v a=$A '\$2 == a {print \$1}')"
+
+# run-job (big-next-job) copies blast-off's private server: -L run-job-<name>, session job-<name>,
+# a job.XXXXXX dir, Stop + StopFailure hooks, and `claude ...; echo $? > <dir>/exit` in the window.
+echo "run-job children (private tmux server)"
+RJ=run-job-smoke
+tmux -f /dev/null -L $RJ new-session -d -s job-smoke -c "$WORK"
+tmux -L $RJ set-option -g remain-on-exit on
+R=$(mktemp -d "$XDG_RUNTIME_DIR/job.XXXXXX")
+printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"cat > %s/done.tmp && mv %s/done.tmp %s/done.json"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"cat > %s/failed.tmp && mv %s/failed.tmp %s/failed.json"}]}]}}\n' \
+  "$R" "$R" "$R" "$R" "$R" "$R" > "$R/settings.json"
+tmux -L $RJ new-window -d -t job-smoke -c "$WORK" "claude --settings $R/settings.json 'run-job prompt'; echo \$? > $R/exit"
+# A socket file with no server behind it (a crashed server leaves one) must be skipped quietly.
+python3 -c 'import socket, sys; s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.close()' "$TMUX_TMPDIR/tmux-$(id -u)/stale-smoke"
+sleep 2
+err=$(session-relay list 2>&1 >/dev/null)
+[ -z "$err" ] && ok "a stale socket is skipped quietly" || { bad "a stale socket is skipped quietly"; echo "$err"; }
+list=$(session-relay list)
+RT=$(awk -v s="$RJ/job-smoke:" 'index($1, s) == 1 {print $1}' <<<"$list")
+[ -n "$RT" ] && grep -q "^$RT .* run-job .*idle .*echo: run-job prompt" <<<"$list" && ok "list shows a run-job child ($RT) with its runner" || { bad "list shows a run-job child with its runner"; echo "$list"; }
+reply=$(session-relay send "$RT" --wait=15 'no force needed' 2>&1)
+grep -q 'echo: no force needed' <<<"$reply" && ok "send reaches a run-job child without --force" || { bad "send reaches a run-job child without --force"; echo "$reply"; }
+rpid=$(python3 "$ROOT/lib/session_panes.py" list | awk -F'\t' -v c="$RT" '$1 == c {print $4}')
+session-airspace hold "$RT" >/dev/null 2>&1
+[ "$(state_of "$rpid")" = T ] && ok "hold works on a run-job child" || bad "hold works on a run-job child (state $(state_of "$rpid"))"
+out=$(session-relay kill "$RT" 2>&1); rc=$?
+[ "$rc" -eq 0 ] && grep -q 'treats a killed child as a crash' <<<"$out" && ok "kill closes a run-job child, with a warning" || { bad "kill closes a run-job child, with a warning (rc $rc)"; echo "$out"; }
 
 echo
 echo "$pass passed, $fail failed"
