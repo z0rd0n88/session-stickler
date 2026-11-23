@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Stand-in for `systemd-run --user --scope ... <command>` in tests/smoke.sh: skips the options and
+# execs the command, as the real --scope does once it has moved itself into the new scope.
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --) shift; break ;;
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+exec "$@"

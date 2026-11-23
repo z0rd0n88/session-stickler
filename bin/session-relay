@@ -1,19 +1,26 @@
 #!/usr/bin/env bash
-# session-relay: see and steer Claude children on the default tmux server (session-switcher's, or
-# a job-* run-job's) without a TTY or `tmux attach`. Works the same from a terminal and Claude Desktop.
+# session-relay: see and steer the Claude children that session-switcher, run-job or blast-off
+# started, without a TTY or `tmux attach`. Works the same from a terminal and from Claude Desktop.
 #
 # Commands:
-#   session-relay list                          One line per child: target, state, memory, last reply
-#   session-relay send <target> [--wait[=SECS]] <prompt|-f file|->
+#   session-relay list                          One line per child: target, runner, state, memory,
+#                                               last reply
+#   session-relay send <target> [--wait[=SECS]] [--force] <prompt|-f file|->
 #                                               Type a prompt into a child; --wait waits out a busy
-#                                               child, sends, and prints the reply to this prompt
+#                                               child, sends, and prints the reply to this prompt.
+#                                               A blast-off child needs --force (its runner drives it)
 #   session-relay last <target>                 Print the child's last full reply (from done.json)
 #   session-relay read <target> [lines]         Print the last N lines of the child's screen (25)
-#   session-relay kill <target>                 Close a child (resumes it first if it is held)
+#   session-relay kill <target>                 Close a child (resumes it first if it is held).
+#                                               Refused for blast-off: use `blast-off stop <job-dir>`.
+#                                               Warns for run-job: it starts the next child
 #
-# <target> is the window name session-switcher prints (sw-ab12cd), "session:index" from
-# `list`, or a bare window index in $SWITCH_SESSION (default handoff).
-# send exits 3 if the child is held, 5 if it shows a dialog (Enter would answer it), 2 on a --wait timeout.
+# <target> is the TARGET column of `list`: "session:index" on the default tmux server,
+# "socket/session:index" on another (blast-off: blast-off-<job>/job-<job>:3). The window name
+# session-switcher prints (sw-ab12cd) and a bare window index in $SWITCH_SESSION (default
+# handoff) also work.
+# send exits 3 if the child is held, 4 for a blast-off child without --force, 5 if it shows a
+# dialog (Enter would answer it), 2 on a --wait timeout.
 # env: SWITCH_SESSION=handoff   RELAY_WAIT=600 (default --wait seconds)
 set -euo pipefail
 
@@ -21,7 +28,7 @@ LIB="$(cd "$(dirname "$(readlink -f "$0")")/../lib" && pwd)"
 # shellcheck source=lib/session-common.sh
 . "$LIB/session-common.sh"
 
-usage() { sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # dialog_line: print the footer line of a choice dialog on the child's screen (a permission prompt,
 # the trust dialog, a question menu) and succeed; fail when there is none. Those dialogs end with
@@ -29,7 +36,7 @@ usage() { sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; }
 # and the input box do not. A dialog takes Enter as "choose the highlighted option", so `send` must
 # never press Enter while one is open: on a permission prompt that option is "1. Yes".
 dialog_line() {
-  tmux capture-pane -p -t "$T_TARGET" 2>/dev/null | tail -n 30 \
+  tm capture-pane -p -t "$T_PANE_ID" 2>/dev/null | tail -n 30 \
     | grep -m1 -E '^[[:space:]]*(Enter to [[:alpha:]]+ · )?Esc to cancel'
 }
 
@@ -41,29 +48,32 @@ busy() {
   resolve_target "$target" || exit 1
   [ "$T_STATE" != held ] || { echo "error: $T_TARGET was held by session-airspace while waiting" >&2; exit 3; }
   [ "$T_STATE" = working ] || [ "$T_STATE" = starting ] \
-    || [ "$(tmux capture-pane -p -t "$T_TARGET" 2>/dev/null | tail -n 30 | grep -c 'esc to interrupt')" -gt 0 ]
+    || [ "$(tm capture-pane -p -t "$T_PANE_ID" 2>/dev/null | tail -n 30 | grep -c 'esc to interrupt')" -gt 0 ]
 }
 
 cmd_list() {
   local rows
   rows=$(managed_rows)
   if [ -z "$rows" ]; then
-    echo "No Claude children found in any tmux session."
+    echo "No Claude children found on any tmux server."
     return 0
   fi
-  printf "%-14s %-10s %-9s %6s %6s %6s  %s\n" TARGET NAME STATE RSS AGE QUIET LAST
-  while IFS=$'\t' read -r target name _ _ _ state rss age quiet _ last; do
-    printf "%-14s %-10s %-9s %5sM %6s %6s  %s\n" "$target" "$name" "$state" "$rss" \
+  local w
+  w=$(awk -F'\t' 'BEGIN { m = 14 } length($1) > m { m = length($1) } END { print m }' <<<"$rows")
+  printf "%-${w}s %-10s %-9s %-9s %6s %6s %6s  %s\n" TARGET NAME RUNNER STATE RSS AGE QUIET LAST
+  while IFS=$'\t' read -r target name _ _ _ state rss age quiet _ _ _ runner _ last; do
+    printf "%-${w}s %-10s %-9s %-9s %5sM %6s %6s  %s\n" "$target" "$name" "$runner" "$state" "$rss" \
       "$(human_age "$age")" "$(human_age "$quiet")" "$last"
   done <<<"$rows"
 }
 
 cmd_send() {
-  local target="" wait="" text="" have_text=0 file=""
+  local target="" wait="" text="" have_text=0 file="" force=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --wait)    wait="${RELAY_WAIT:-600}"; shift ;;
       --wait=*)  wait="${1#*=}"; shift ;;
+      --force)   force=1; shift ;;
       -f)        [ "$#" -ge 2 ] || { echo "error: -f needs a file" >&2; exit 1; }; file="$2"; shift 2 ;;
       -)         text=$(cat); have_text=1; shift ;;
       *)
@@ -75,13 +85,19 @@ cmd_send() {
   done
   [ -n "$file" ] && { text=$(cat "$file"); have_text=1; }
   [ -n "$target" ] && [ "$have_text" -eq 1 ] && [ -n "$text" ] \
-    || { echo 'usage: session-relay send <target> [--wait[=SECS]] "<prompt>" | -f file | -' >&2; exit 1; }
+    || { echo 'usage: session-relay send <target> [--wait[=SECS]] [--force] "<prompt>" | -f file | -' >&2; exit 1; }
   [ -z "$wait" ] || [[ "$wait" =~ ^[0-9]+$ ]] || { echo "error: --wait takes whole seconds" >&2; exit 1; }
 
   resolve_target "$target"
   if [ "$T_STATE" = held ]; then
     echo "error: $T_TARGET is held by session-airspace; run: session-airspace release $T_TARGET" >&2
     exit 3
+  fi
+  if [ "$T_RUNNER" = blast-off ] && [ "$force" -eq 0 ]; then
+    echo "error: $T_TARGET is a blast-off child: its runner drives it from the job's brief and" \
+         "checkpoint, and a prompt typed in could derail the job. Read it with: session-relay read" \
+         "$T_TARGET. To send anyway: session-relay send --force $T_TARGET ..." >&2
+    exit 4
   fi
 
   # With --wait, the reply must be to THIS prompt. A busy child would end its current turn first,
@@ -104,19 +120,20 @@ cmd_send() {
   if dlg=$(dialog_line); then
     echo "error: $T_TARGET is showing a dialog (${dlg#"${dlg%%[![:space:]]*}"}); nothing was sent." >&2
     echo "Enter would pick its highlighted option, which on a permission prompt approves the command." >&2
-    echo "See it with: session-relay read $T_TARGET. Answer it in a terminal (tmux attach -t ${T_TARGET%%:*})." >&2
+    echo "See it with: session-relay read $T_TARGET. Answer it in a terminal (tmux -L $T_SOCKET attach -t $(sed 's|^.*/||; s|:[^:]*$||' <<<"$T_TARGET"))." >&2
     exit 5
   fi
 
-  local done_file="$T_DIR/done.json" before=""
-  before=$(stat -c "%y %s" "$done_file" 2>/dev/null || true)
+  # A turn ends in done.json, or (blast-off's StopFailure hook) in failed.json.
+  local done_file="$T_DIR/done.json" failed_file="$T_DIR/failed.json" before=""
+  before=$(stat -c "%y %s" "$done_file" "$failed_file" 2>/dev/null || true)
 
   # Paste, don't type: send-keys would read words like "Enter" or "C-c" as key names, and a
   # newline would submit half a prompt. paste-buffer -p wraps the text in bracketed-paste
   # markers when the pane asked for them (Claude Code does), so newlines stay in the prompt.
   local buf="relay-$$"
-  printf '%s' "$text" | tmux load-buffer -b "$buf" -
-  tmux paste-buffer -p -d -b "$buf" -t "$T_TARGET"
+  printf '%s' "$text" | tm load-buffer -b "$buf" -
+  tm paste-buffer -p -d -b "$buf" -t "$T_PANE_ID"
   sleep 0.5   # let the TUI finish taking the paste before the submitting Enter
   # A dialog can open between the check above and now (the child was mid-turn). Look again.
   if dlg=$(dialog_line); then
@@ -124,18 +141,18 @@ cmd_send() {
     echo "See it with: session-relay read $T_TARGET. Answer it in a terminal, then send again." >&2
     exit 5
   fi
-  tmux send-keys -t "$T_TARGET" Enter
+  tm send-keys -t "$T_PANE_ID" Enter
   echo "sent to $T_TARGET ($T_NAME): $(printf '%s' "$text" | head -c 120 | tr '\n' ' ')"
 
   [ -n "$wait" ] || return 0
   local now first=1
   while [ "$first" = 1 ] || [ "$SECONDS" -lt "$deadline" ]; do   # --wait=0 still takes one look
     first=0
-    now=$(stat -c "%y %s" "$done_file" 2>/dev/null || true)
-    if [ -n "$now" ] && [ "$now" != "$before" ] && [ -s "$done_file" ]; then
-      sleep 0.2   # the hook writes done.json with `cat >`; give it a moment to finish
+    now=$(stat -c "%y %s" "$done_file" "$failed_file" 2>/dev/null || true)
+    if [ -n "$now" ] && [ "$now" != "$before" ] && { [ -s "$done_file" ] || [ -s "$failed_file" ]; }; then
+      sleep 0.2   # session-switcher's hook writes done.json with `cat >`; give it a moment to finish
       echo "--- reply from $T_TARGET ---"
-      python3 "$LIB/session_panes.py" last "$done_file" || echo "(no message in Stop event; see: session-relay read $T_TARGET)"
+      python3 "$LIB/session_panes.py" last "$T_DIR" || echo "(no message in Stop event; see: session-relay read $T_TARGET)"
       return 0
     fi
     sleep 1
@@ -146,7 +163,7 @@ cmd_send() {
 
 cmd_last() {
   resolve_target "${1:-}"
-  python3 "$LIB/session_panes.py" last "$T_DIR/done.json" \
+  python3 "$LIB/session_panes.py" last "$T_DIR" \
     || { echo "$T_TARGET has not finished a turn yet (state: $T_STATE)" >&2; exit 1; }
 }
 
@@ -156,20 +173,31 @@ cmd_read() {
   resolve_target "${1:-}"
   echo "=== $T_TARGET ($T_NAME, $T_STATE) — last $lines lines ==="
   # -J joins wrapped lines; -S reaches into scrollback so `lines` can exceed the screen height.
-  tmux capture-pane -p -J -S "-$lines" -t "$T_TARGET" | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' | tail -n "$lines"
+  tm capture-pane -p -J -S "-$lines" -t "$T_PANE_ID" | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' | tail -n "$lines"
 }
 
 cmd_kill() {
   resolve_target "${1:-}"
+  if [ "$T_RUNNER" = blast-off ]; then
+    # Its runner would take a closed window for a dead child, log it and start a replacement.
+    echo "error: $T_TARGET is a blast-off child; closing its window makes the runner treat it as" \
+         "dead and launch another. Stop the job instead: $(blast_off_stop_hint)" >&2
+    exit 4
+  fi
+  if [ "$T_RUNNER" = run-job ]; then
+    echo "warning: $T_TARGET is a run-job child; run-job treats a killed child as a crash and starts the next one" >&2
+  fi
   [ "$T_STATE" = held ] && release_tree "$T_CLAUDE"   # a stopped process cannot act on SIGHUP
-  tmux kill-window -t "$T_TARGET"
+  # Only the child's pane: a pane the user split off beside it is not ours. A last pane takes its
+  # window with it, remain-on-exit or not.
+  tm kill-pane -t "$T_PANE_ID"
   # claude exits on the hangup but takes a few seconds to shut down; wait so the caller knows.
   local i
   for ((i = 0; i < 15; i++)); do
     [ -d "/proc/$T_CLAUDE" ] && [ "$(proc_state "$T_CLAUDE")" != Z ] || { echo "closed $T_TARGET ($T_NAME)"; return 0; }
     sleep 1
   done
-  echo "closed window $T_TARGET, but claude (pid $T_CLAUDE) is still shutting down after 15s" >&2
+  echo "closed $T_TARGET, but claude (pid $T_CLAUDE) is still shutting down after 15s" >&2
 }
 
 case "${1:-}" in

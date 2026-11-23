@@ -1,6 +1,6 @@
 ---
 name: session-airspace
-description: Pause and resume Claude child sessions on the default tmux server (from session-switcher, or a run-job that uses job-* sessions there) to keep RAM under control, or run a guard that does it automatically. Use when several parallel sessions are running, RAM is high, WSL is near its memory cap, or the user asks to pause, hold, freeze or resume a background session.
+description: Pause and resume Claude child sessions (from session-switcher, run-job or blast-off) to keep RAM under control, or run a guard that does it automatically. Use when several parallel sessions are running, RAM is high, WSL is near its memory cap, or the user asks to pause, hold, freeze or resume a background session.
 ---
 
 # Session Airspace
@@ -12,6 +12,7 @@ Holds a Claude child with `SIGSTOP` (it and every process under it stop, using n
 ```bash
 session-airspace status                       # RAM, then each child FLYING/HOLDING and its memory
 session-airspace hold sw-ab12cd               # pause it (targets come from `session-relay list`)
+session-airspace hold --force blast-off-api/job-api:3   # a blast-off child needs --force (see Limits)
 session-airspace release sw-ab12cd            # resume it
 session-airspace guard                        # watch: hold at >= 85% RAM, release at <= 75%
 session-airspace guard --threshold 80 --interval 10
@@ -20,7 +21,7 @@ session-airspace guard --once                 # one check, then exit (cron-frien
 
 ## Guard rules
 
-- At or above the threshold, it holds the flying child with the most memory, one per tick.
+- At or above the threshold, it holds the flying child with the most memory, one per tick. It never picks a blast-off child.
 - It always leaves one child flying, so work keeps moving even when the pressure comes from elsewhere.
 - At 10 points or more below the threshold, it releases one child **it** held. A hold you placed by hand stays until you release it.
 - However the guard stops (`Ctrl-C`, `SIGTERM`, a hangup, or an error), it releases everything it was holding. Only `SIGKILL` can strand a hold.
@@ -33,3 +34,4 @@ session-airspace guard --once                 # one check, then exit (cron-frien
 - A held child keeps any file or git lock it holds. Release it before another session needs that repository's lock.
 - `status` marks a child `not holdable` when it was launched by an older session-switcher or run-job, where `claude` is the tmux pane's own process. tmux resumes such a process instantly, so a hold cannot stick. Relaunch it with the current tools.
 - `run-job` pauses a child's `JOB_CHILD_TIMEOUT` clock while it is held. A `session-switcher` child keeps counting toward `SWITCH_TIMEOUT`.
+- blast-off does **not** pause its clock: it times each child in wall-clock seconds (`JOB_CHILD_TIMEOUT`, default 2 h), then kills and replaces it, losing the held work. So `hold` refuses a blast-off child unless `--force` (it then warns), and `guard` skips them; `status` notes `guard skips`. blast-off's systemd slice already caps its children's memory. To pause a whole job, use `blast-off stop <job-dir>`.

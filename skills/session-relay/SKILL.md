@@ -1,16 +1,16 @@
 ---
 name: session-relay
-description: See and steer Claude child sessions on the default tmux server (started by session-switcher, or by a big-next-job run-job that uses job-* sessions there), without tmux attach. Use to check on a handed-off session, send it a follow-up prompt and get the reply, read its screen, or close it — including from Claude Desktop, where tmux attach does not work.
+description: See and steer Claude child sessions started by session-switcher, big-next-job's run-job or blast-off, without tmux attach. Use to check on a handed-off session, send it a follow-up prompt and get the reply, read its screen, or close it — including from Claude Desktop, where tmux attach does not work.
 ---
 
 # Session Relay
 
-Talks to the Claude children on the default tmux server: those `session-switcher` starts (tmux session `handoff`) and those of a `run-job` that uses `job-*` sessions there. It finds them in every session on that server, so one `list` shows them all. Children on a private `tmux -L` server (a newer `run-job`'s, blast-off's) are not listed and cannot be targeted; the newer session-stickler from PR #10 finds them. Everything works without a TTY.
+Talks to the Claude children that `session-switcher` (tmux session `handoff`), `run-job` (its own server `-L run-job-<name>`, session `job-<name>`) and blast-off (a private tmux server per job, `-L blast-off-<job>`) start. It finds them in every session on every tmux server you own, so one `list` shows them all, with a RUNNER column. Everything works without a TTY.
 
 ## Commands
 
 ```bash
-session-relay list                                  # every child: target, state, memory, last reply
+session-relay list                                  # every child: target, runner, state, memory, last reply
 session-relay send sw-ab12cd --wait "Now run the tests and summarise failures"
 session-relay send sw-ab12cd --wait=900 -f followup.md     # prompt from a file; - reads stdin
 session-relay last sw-ab12cd                        # the latest full reply
@@ -18,7 +18,19 @@ session-relay read sw-ab12cd 60                     # last 60 lines of its scree
 session-relay kill sw-ab12cd                        # close it (resumes it first if held)
 ```
 
-A target is the window name `session-switcher` printed (`sw-ab12cd`), or `session:index` from `list` (for example `job-api:2`).
+A target is the TARGET column of `list`: `session:index` on the default tmux server (for example `job-api:2`), `socket/session:index` on another (a blast-off child: `blast-off-api/job-api:3`). The window name `session-switcher` printed (`sw-ab12cd`) also works.
+
+## blast-off children
+
+blast-off's runner drives its children from the job's brief and closes each window when its turn ends, so they are normally listed only while working.
+
+- `list`, `read`, `last`: as for any child.
+- `send` refuses (exit 4) without `--force`: a typed prompt can derail the job. Send only when the user asks you to steer that child.
+- `kill` refuses (exit 4): the runner would treat the closed window as a dead child and start another. Stop the job with the `blast-off stop <job-dir>` command it prints.
+
+## run-job children
+
+Every command works as usual. `kill` warns: run-job treats a killed child as a crash and starts the next one, so close one only when that is what you want.
 
 ## Steps for a follow-up
 
@@ -29,7 +41,7 @@ A target is the window name `session-switcher` printed (`sw-ab12cd`), or `sessio
 
 ## States
 
-- `starting`: launched, no turn yet. `working`: a turn is in progress. `idle`: last turn finished. `held`: paused by `session-airspace`.
+- `starting`: launched, no turn yet. `working`: a turn is in progress. `idle`: last turn finished. `failed`: an API error ended the last turn (blast-off's `StopFailure` hook wrote `failed.json`; `last` prints the error). `held`: paused by `session-airspace`.
 
 ## Limits
 
