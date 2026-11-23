@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""Stand-in for `claude` in tests/smoke.sh. Takes `--settings <dir>/settings.json <prompt>`, answers
+"echo: <prompt>", and fires the settings' Stop hook the way Claude Code does: the Stop event JSON
+on the hook's stdin. Then it answers each prompt typed into its pane the same way.
+
+env: FAKE_MB=0 (memory to hold, to give children different sizes)  FAKE_DELAY=0.5 (seconds per reply)
+A prompt containing ASK-PERMISSION shows a permission prompt first; the next line typed answers it
+(empty or "1" = approved), recorded as <dir>/approved or <dir>/denied. A prompt containing SLOW
+takes 3 s. While a turn runs the screen shows "esc to interrupt", as Claude Code's footer does.
+It also starts one `sleep` child, so holds can be checked across a process tree."""
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+args = sys.argv[1:]
+settings = args[args.index("--settings") + 1]
+prompt = args[-1]
+hook = json.load(open(settings))["hooks"]["Stop"][0]["hooks"][0]["command"]
+transcript = os.path.join(os.path.dirname(settings), "fake-transcript.jsonl")
+ballast = bytearray(int(os.environ.get("FAKE_MB", "0")) * 1024 * 1024)
+for i in range(0, len(ballast), 4096):
+    ballast[i] = 1   # touch every page so it counts as resident
+helper = subprocess.Popen(["sleep", "100000"])
+delay = float(os.environ.get("FAKE_DELAY", "0.5"))
+
+
+def answer(text):
+    with open(transcript, "a") as f:
+        f.write(json.dumps({"type": "user", "text": text}) + "\n")
+    if "ASK-PERMISSION" in text:
+        # A permission prompt, as Claude Code draws it. Enter picks the highlighted "1. Yes".
+        print(" Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel · Tab to amend", flush=True)
+        choice = sys.stdin.readline()
+        # A dialog ignores pasted text (as Claude Code's does) and acts on the keys: Enter alone, or "1", approves.
+        keys = re.sub(r"\x1b\[200~.*?\x1b\[201~", "", choice, flags=re.S).strip()
+        verdict = "approved" if keys in ("", "1") else "denied"
+        open(os.path.join(os.path.dirname(settings), verdict), "w").write(choice)
+        print("\x1b[2J\x1b[H", end="", flush=True)   # the dialog goes away once answered, as in Claude Code
+        text = f"{verdict} ({text})"
+    # Claude Code shows "esc to interrupt" in its footer exactly while a turn runs; the turn's end
+    # redraws the screen without it.
+    print("✻ Working… (esc to interrupt)", flush=True)
+    for _ in range(int((3 if "SLOW" in text else delay) * 10)):   # small steps, so time held is lost
+        time.sleep(0.1)
+    print("\x1b[2J\x1b[H", end="", flush=True)
+    reply = "echo: " + text
+    print(reply, flush=True)
+    event = {"session_id": "fake", "transcript_path": transcript, "last_assistant_message": reply}
+    subprocess.run(hook, shell=True, input=json.dumps(event), text=True, check=False)
+
+
+# Ask for bracketed paste, as Claude Code does: a paste then arrives between ESC[200~ and ESC[201~,
+# and newlines inside it belong to the prompt instead of submitting it.
+print("\x1b[?2004hfake claude ready", flush=True)
+answer(prompt)
+START, END = "\x1b[200~", "\x1b[201~"
+pending, in_paste = "", False
+while True:
+    line = sys.stdin.readline()
+    if line == "":
+        break
+    if START in line:
+        in_paste, line = True, line.replace(START, "")
+    if END in line:
+        in_paste, line = False, line.replace(END, "")
+    pending += line
+    if not in_paste and pending.strip():
+        answer(pending.strip("\n"))
+        pending = ""
+helper.kill()
