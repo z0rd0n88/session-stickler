@@ -9,14 +9,14 @@ Hands work to a fresh Claude Code session. It has two modes. **tmux mode** (the 
 
 ## Steps
 
-1. Write the brief to a file (for example `handoff.md`). Put everything the child needs in it; the child shares no context with you. Start it with a heading, not a `-`.
+1. Write the brief to a file (for example `handoff.md`). Put everything the child needs in it; the child shares no context with you. Start it with a heading, not a `-`. Don't point it at files in your scratchpad or task-output dirs (`/tmp/claude-<uid>/<project>/<session-uuid>/...`): they belong to your session and may be gone when the child reads them, so `session-switcher` refuses such a brief and names each path. Copy those files somewhere durable (a gitignored dir in the repo) and point the brief there.
 2. Run:
 
 ```bash
 session-switcher handoff.md [workdir]
 ```
 
-   Set `CLAUDE_FLAGS="--dangerously-skip-permissions"` when the child must use tools unattended. `SWITCH_TIMEOUT` (seconds, default 90) bounds the wait; give the Bash tool a longer timeout than that. `SWITCH_MODE=tmux` or `SWITCH_MODE=desktop` overrides the default mode.
+   Set `CLAUDE_FLAGS="--dangerously-skip-permissions"` when the child must use tools unattended. `SWITCH_TIMEOUT` (seconds, default 180) bounds the wait. Give this Bash call a longer timeout than that (for example `timeout: 240000`); the Bash tool's default 120 s ends the call before `session-switcher` does. `SWITCH_MODE=tmux` or `SWITCH_MODE=desktop` overrides the default mode.
 3. If the output starts with `asked Claude Desktop to open`, follow **Desktop mode** below and stop here.
 4. Otherwise read the output: `launched window=sw-<id>`, `child session: <id>`, `transcript: <path>`, and the child's last message. Relay the message to the user.
 5. The child stays open as window `sw-<id>`. Continue it with `session-relay send sw-<id> --wait "<prompt>"` (the `session-relay` skill), and close it with `session-relay kill sw-<id>`. In a terminal, `tmux attach -t handoff` also works; from Claude Desktop it does not.
@@ -44,4 +44,5 @@ session-switcher handoff.md [workdir]
 - The brief is a command-line argument, so any process of the same user can read it from `/proc`. Fine on a single-user box; for secrets, put a file path in the brief instead of the secret.
 - A folder the child has never opened shows Claude's trust dialog. `session-switcher` answers it only when the workdir is the parent's own directory; otherwise it times out and someone must answer it in a terminal (`tmux attach -t handoff`).
 - A warning before launch means RAM is already at `SWITCH_RAM_WARN` percent (default 85) or more; check `session-airspace status` before adding children.
+- Exit 1 with a list of paths means the brief points into a session's temporary dirs; copy the files and rerun (or `SWITCH_ALLOW_TEMP=1` to launch anyway).
 - Exit 2 means timeout; the child is still running. Check it with `session-relay read sw-<id>`, and get the reply later with `session-relay last sw-<id>`.

@@ -3,15 +3,20 @@
 # and get its first reply back. Mechanism copied from Orca's `worktree create --agent claude --prompt`:
 #   brief = one shell argv, identity = env vars, return channel = Claude Stop hook -> done.json.
 # Usage:  session-switcher <brief.md> [workdir]
-#   env:  CLAUDE_FLAGS="--dangerously-skip-permissions"   SWITCH_TIMEOUT=90   SWITCH_SESSION=handoff
+#   env:  CLAUDE_FLAGS="--dangerously-skip-permissions"   SWITCH_SESSION=handoff
+#         SWITCH_TIMEOUT=180 (seconds to wait for the first reply; a child that reads a long brief and
+#           starts subagents can take over 2 minutes. Run from Claude's Bash tool, give that call a
+#           longer timeout than this, e.g. 240000 ms: the tool's default 120 s cuts the wait short)
 #         SWITCH_RAM_WARN=85 (warn before launching when RAM use is at or above this percent)
 #         SWITCH_MODE=desktop|tmux (default: desktop when the parent runs in Claude Desktop; desktop opens the child there, no reply back)
+#         SWITCH_ALLOW_TEMP=1 (launch even when the brief points into a session's scratchpad or task dirs)
 # Follow up:  session-relay send <window> --wait "..."    Watch:  session-relay read <window>
 set -euo pipefail
-case "${1:-}" in -h|--help|"") sed -n 2,9p "$0"; exit 0;; esac
+case "${1:-}" in -h|--help|"") sed -n 2,13p "$0"; exit 0;; esac
 BRIEF="$1"
 WORKDIR="$(cd "${2:-$PWD}" && pwd)"
-TIMEOUT="${SWITCH_TIMEOUT:-90}"
+TIMEOUT="${SWITCH_TIMEOUT:-180}"
+[[ "$TIMEOUT" =~ ^[0-9]+$ ]] || { echo "SWITCH_TIMEOUT must be a whole number of seconds, got: $TIMEOUT" >&2; exit 1; }
 SESSION="${SWITCH_SESSION:-handoff}"
 MODE="${SWITCH_MODE:-tmux}"
 [ -z "${SWITCH_MODE:-}" ] && [ "${CLAUDE_CODE_ENTRYPOINT:-}" = claude-desktop ] && MODE=desktop
@@ -24,12 +29,28 @@ command -v python3 >/dev/null || { echo "python3 not on PATH" >&2; exit 1; }
 test -s "$BRIEF" || { echo "brief missing or empty: $BRIEF" >&2; exit 1; }
 case "$(head -c1 "$BRIEF")" in -) echo "brief must not start with '-' (claude would parse it as a flag)" >&2; exit 1;; esac
 
-# 0. another child adds memory; say so when RAM is already short (session-airspace can hold children)
+# 0. Claude Code keeps a session's scratchpad and background-task output under
+#    <tmp>/claude-<uid>/<project>/<session-uuid>/. Those dirs belong to that session and can be
+#    cleaned up before the child reads them, so refuse a brief that points there and name each path.
+TEMP_PATHS=$(grep -oE "[^[:space:]\"'\`()<>]*/claude-[0-9]+/[^/[:space:]]+/[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}(/[^[:space:]\"'\`()<>]*)?" "$BRIEF" \
+  | sed 's/[.,;:!?]*$//' | sort -u || true)
+if [ -n "$TEMP_PATHS" ]; then
+  echo "the brief points into a Claude session's temporary dirs (scratchpad, task output), which may be gone when the child reads them:" >&2
+  while IFS= read -r p; do echo "  $p"; done <<<"$TEMP_PATHS" >&2
+  if [ "${SWITCH_ALLOW_TEMP:-0}" = 1 ]; then
+    echo "launching anyway (SWITCH_ALLOW_TEMP=1)" >&2
+  else
+    echo "copy them somewhere durable (e.g. a gitignored dir in the repo), point the brief there, and rerun; SWITCH_ALLOW_TEMP=1 launches anyway" >&2
+    exit 1
+  fi
+fi
+
+# 1. another child adds memory; say so when RAM is already short (session-airspace can hold children)
 awk -v warn="${SWITCH_RAM_WARN:-85}" '/^MemTotal:/ {t=$2} /^MemAvailable:/ {a=$2}
   END { p = 100 * (t - a) / t; if (p >= warn) printf "warning: RAM is %d%% used before launch; see: session-airspace status\n", p }' \
   /proc/meminfo >&2 || true
 
-# 1. a private dir the parent watches (mktemp -d gives 0700)
+# 2. a private dir the parent watches (mktemp -d gives 0700)
 DIR=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/switch.XXXXXX")
 ID=${DIR##*/}
 NAME="sw-${ID#switch.}"   # window name: stable, unlike an index; no '.', which tmux reads as a pane
@@ -57,17 +78,17 @@ if [ "$MODE" = desktop ]; then
   exit 0
 fi
 
-# 2. return channel: Claude pipes the Stop event JSON into the hook; it lands as done.json
+# 3. return channel: Claude pipes the Stop event JSON into the hook; it lands as done.json
 printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"cat > %s/done.json"}]}]}}\n' "$DIR" > "$DIR/settings.json"
 
-# 3. the brief as ONE argv, POSIX-quoted the way Orca does it
+# 4. the brief as ONE argv, POSIX-quoted the way Orca does it
 Q="'$(sed "s/'/'\\\\''/g" "$BRIEF")'"
 
-# 4. a tmux server whose environment does not say "you are inside Claude Code"
+# 5. a tmux server whose environment does not say "you are inside Claude Code"
 SCRUB=$(env | grep -o '^CLAUDE[A-Z_]*=' | sed 's/=$//; s/^/-u /')
 tmux has-session -t "$SESSION" 2>/dev/null || env $SCRUB tmux new-session -d -s "$SESSION"
 
-# 5. launch: identity in env, brief in argv. The trailing `; :` keeps the pane's shell alive as
+# 6. launch: identity in env, brief in argv. The trailing `; :` keeps the pane's shell alive as
 #    claude's parent. Without it the shell execs claude, claude becomes the pane process, and tmux
 #    sends SIGCONT to a stopped pane process at once, so session-airspace could never hold it.
 WIN=$(tmux new-window -dP -t "$SESSION" -n "$NAME" -c "$WORKDIR" \
@@ -76,7 +97,7 @@ WIN=$(tmux new-window -dP -t "$SESSION" -n "$NAME" -c "$WORKDIR" \
 echo "launched  window=$NAME ($WIN)  workdir=$WORKDIR  dir=$DIR"
 echo "watch:    session-relay read $NAME   (in a terminal: tmux attach -t $SESSION)"
 
-# 6. wait for the child's first turn to end. A folder the child has not seen before shows the
+# 7. wait for the child's first turn to end. A folder the child has not seen before shows the
 #    "trust this folder?" dialog; answer it only for the parent's own working directory.
 #    ponytail: screen scrape, same trick Orca's daemon uses; replace if claude grows a --trust flag.
 for ((i=0; i<TIMEOUT; i++)); do
@@ -87,12 +108,13 @@ for ((i=0; i<TIMEOUT; i++)); do
   sleep 1
 done
 [ -s "$DIR/done.json" ] || {
-  echo "timeout after ${TIMEOUT}s; child still running in window $NAME." >&2
+  echo "timeout after ${TIMEOUT}s; the child is still running in window $NAME (raise SWITCH_TIMEOUT to wait longer)." >&2
   echo "check: session-relay read $NAME   reply when done: session-relay last $NAME" >&2
+  echo "in a terminal: tmux attach -t $SESSION" >&2
   exit 2
 }
 
-# 7. surface the result: session id, transcript, and the child's last message
+# 8. surface the result: session id, transcript, and the child's last message
 python3 - "$DIR/done.json" <<'PY'
 import json, sys
 ev = json.load(open(sys.argv[1]))
