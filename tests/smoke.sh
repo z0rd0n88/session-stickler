@@ -88,15 +88,28 @@ echo "999999 1" >> "$HELD"   # a child that is gone (e.g. closed with session-re
 out=$(AIRSPACE_TEST_PCT=50 session-airspace guard --once 2>&1); rc=$?
 [ "$rc" -eq 0 ] && grep -q "FLYING pid $apid" <<<"$out" && ok "a stale last entry does not stop the guard (it releases $A)" || { bad "stale last entry (rc $rc)"; echo "$out"; }
 ! grep -q '^999999 ' "$HELD" && ok "the stale entry is dropped" || bad "the stale entry is dropped"
-AIRSPACE_TEST_PCT=95 session-airspace guard --interval 1 > "$WORK/guard.log" 2>&1 & gpid=$!
-for _ in $(seq 1 30); do [ "$(state_of "$apid")" = T ] && break; sleep 0.2; done
-tmux new-window -d -t smoke -n $'tab\tname' 'sleep 100'   # makes discovery fail, so the guard dies on its next tick
+# A copy of the tools whose discovery (session_panes.py list) fails once $WORK/fail-list exists,
+# so a running guard hits a real `set -e` error; `tree` keeps working, so it can still release.
+mkdir -p "$WORK/copy/bin" "$WORK/copy/lib"
+cp "$ROOT/bin/session-airspace" "$WORK/copy/bin/"; cp "$ROOT"/lib/* "$WORK/copy/lib/"
+mv "$WORK/copy/lib/session_panes.py" "$WORK/copy/lib/session_panes_real.py"
+cat > "$WORK/copy/lib/session_panes.py" <<PY
+import os, runpy, sys
+if sys.argv[1:2] == ["list"] and os.path.exists("$WORK/fail-list"):
+    sys.exit("injected discovery failure")
+runpy.run_path("$WORK/copy/lib/session_panes_real.py", run_name="__main__")
+PY
+rm -f "$WORK/fail-list"
+AIRSPACE_TEST_PCT=95 "$WORK/copy/bin/session-airspace" guard --interval 1 > "$WORK/guard.log" 2>&1 & gpid=$!
+for _ in $(seq 1 30); do grep -q HOLDING "$WORK/guard.log" && break; sleep 0.2; done
+touch "$WORK/fail-list"   # the guard's next tick fails under set -e
 for _ in $(seq 1 30); do kill -0 "$gpid" 2>/dev/null || break; sleep 0.2; done
-! kill -0 "$gpid" 2>/dev/null && [ "$(state_of "$apid")" != T ] && grep -q "released 1" "$WORK/guard.log" \
-  && ok "a guard that dies on an error releases its holds" || { bad "a guard that dies on an error releases its holds (state $(state_of "$apid"))"; cat "$WORK/guard.log"; }
-kill "$gpid" 2>/dev/null; tmux kill-window -t $'smoke:tab\tname' 2>/dev/null
+wait "$gpid"; rc=$?
+[ "$rc" -ne 0 ] && [ "$(state_of "$apid")" != T ] && grep -q "released 1" "$WORK/guard.log" \
+  && ok "a guard that dies on an error releases its holds" || { bad "a guard that dies on an error releases its holds (rc $rc, state $(state_of "$apid"))"; cat "$WORK/guard.log"; }
+rm -f "$WORK/fail-list"
 AIRSPACE_TEST_PCT=95 session-airspace guard --interval 1 > "$WORK/guard.log" 2>&1 & gpid=$!
-for _ in $(seq 1 30); do [ "$(state_of "$apid")" = T ] && break; sleep 0.2; done
+for _ in $(seq 1 30); do grep -q HOLDING "$WORK/guard.log" && break; sleep 0.2; done
 kill -TERM "$gpid"; wait "$gpid"; rc=$?
 [ "$rc" -eq 143 ] && [ "$(state_of "$apid")" != T ] && ok "SIGTERM stops the guard and releases its holds" || { bad "SIGTERM (rc $rc, state $(state_of "$apid"))"; cat "$WORK/guard.log"; }
 session-airspace hold "$B" >/dev/null
