@@ -23,7 +23,7 @@ session-airspace guard --once                 # one check, then exit (cron-frien
 - At or above the threshold, it holds the flying child with the most memory, one per tick.
 - It always leaves one child flying, so work keeps moving even when the pressure comes from elsewhere.
 - At 10 points or more below the threshold, it releases one child **it** held. A hold you placed by hand stays until you release it.
-- `Ctrl-C` or `SIGTERM` releases everything the guard was holding.
+- However the guard stops (`Ctrl-C`, `SIGTERM`, a hangup, or an error), it releases everything it was holding. Only `SIGKILL` can strand a hold.
 
 `guard` runs until stopped. Start it in a spare terminal or tmux window, not in a blocking Bash tool call.
 

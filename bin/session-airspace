@@ -84,11 +84,20 @@ cmd_release() {
 starttime() { awk '{ sub(/.*\) /, ""); print $20 }' "/proc/$1/stat" 2>/dev/null; }
 remember()  { mkdir -p "$STATE_DIR"; echo "$1 $(starttime "$1")" >> "$HELD_FILE"; }
 forget()    { [ -f "$HELD_FILE" ] || return 0; awk -v p="$1" '$1 != p' "$HELD_FILE" > "$HELD_FILE.tmp"; mv "$HELD_FILE.tmp" "$HELD_FILE"; }
-guard_held() {   # live PIDs the guard holds, oldest first
+# guard_held: live PIDs the guard holds, oldest first. Drops entries that no longer apply (the child
+# exited, was killed with session-relay, or was resumed by someone else), so a stale line can never
+# be mistaken for a hold. Always returns 0: under `set -e` a failed test on the last line would
+# otherwise end the guard and strand its other holds.
+guard_held() {
   [ -f "$HELD_FILE" ] || return 0
+  local pid st keep=""
   while read -r pid st; do
-    [ "$(starttime "$pid")" = "$st" ] && [ "$(proc_state "$pid")" = T ] && echo "$pid"
+    if [ -n "$pid" ] && [ "$(starttime "$pid")" = "$st" ] && [ "$(proc_state "$pid")" = T ]; then
+      echo "$pid"; keep+="$pid $st"$'\n'
+    fi
   done < "$HELD_FILE"
+  printf '%s' "$keep" > "$HELD_FILE.tmp" && mv "$HELD_FILE.tmp" "$HELD_FILE"
+  return 0
 }
 
 guard_usage() {
@@ -116,13 +125,17 @@ guard_tick() {
       echo "[$(date +%T)] RAM ${pct}% >= ${threshold}%: no holdable child (old launches cannot be held)"
       return 0
     fi
+    # Record first: a signal during the hold must find this child in the list guard_exit releases.
+    # guard_held ignores an entry whose process is not stopped, so a failed hold leaves nothing behind.
+    remember "$cpid"
     if do_hold "$target" "$cpid" 1; then
-      remember "$cpid"
       echo "[$(date +%T)] RAM ${pct}% >= ${threshold}%: HOLDING $target (pid $cpid, ${rss}MB)"
+    else
+      forget "$cpid"
     fi
   elif [ "$pct_int" -le "$((threshold - 10))" ]; then
     local pid
-    pid=$(guard_held | head -1)
+    pid=$(guard_held); pid=${pid%%$'\n'*}   # no `| head -1`: SIGPIPE plus pipefail would end the guard
     [ -n "$pid" ] || return 0
     release_tree "$pid"
     forget "$pid"
@@ -163,8 +176,12 @@ cmd_guard() {
   fi
 
   if [ "$once" -eq 1 ]; then guard_tick "$threshold"; return 0; fi
-  # A guard that dies must not leave its holds frozen forever.
-  trap 'guard_exit; exit 130' INT TERM HUP
+  # A guard that stops for any reason (Ctrl-C, SIGTERM, a hangup, or a `set -e` error) must not
+  # leave its holds frozen: the EXIT trap releases them on every way out but SIGKILL.
+  trap guard_exit EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
   echo "guard: hold at >= ${threshold}% RAM, release at <= $((threshold - 10))%, every ${interval}s (Ctrl-C releases its holds)"
   while true; do
     guard_tick "$threshold"
