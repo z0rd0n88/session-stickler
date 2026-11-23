@@ -240,6 +240,26 @@ session-airspace hold "$RT" >/dev/null 2>&1
 out=$(session-relay kill "$RT" 2>&1); rc=$?
 [ "$rc" -eq 0 ] && grep -q 'treats a killed child as a crash' <<<"$out" && ok "kill closes a run-job child, with a warning" || { bad "kill closes a run-job child, with a warning (rc $rc)"; echo "$out"; }
 
+echo "session-switcher checks (#4, #5)"
+SP=/tmp/claude-1000/-home-me-repo/0b5e1c2d-3f4a-4b6c-9d8e-7f6a5b4c3d2e
+printf '# Next\nRead %s/scratchpad/review/a.md.\nAlso see (%s/tasks/b1.output), and /tmp/claude-1000/-home-me-repo/not-a-uuid/x.\n' "$SP" "$SP" > tempbrief.md
+before=$(tmux list-windows -a 2>/dev/null | wc -l)
+out=$(SWITCH_TIMEOUT=20 session-switcher tempbrief.md 2>&1); rc=$?
+after=$(tmux list-windows -a 2>/dev/null | wc -l)
+[ "$rc" -eq 1 ] && [ "$before" -eq "$after" ] && ok "a brief pointing into a session's scratchpad is refused before launch" || { bad "scratchpad brief refused (rc $rc, windows $before -> $after)"; echo "$out"; }
+grep -qx "  $SP/scratchpad/review/a.md" <<<"$out" && grep -qx "  $SP/tasks/b1.output" <<<"$out" && ok "the refusal names each path, without trailing punctuation" || { bad "the refusal names each path"; echo "$out"; }
+! grep -q 'not-a-uuid' <<<"$out" && ok "a claude-<uid> path without a session uuid is not flagged" || bad "a claude-<uid> path without a session uuid is not flagged"
+printf '# Next\nRead docs/handoff/review.md and /tmp/build.log.\n' > durable.md
+out=$(SWITCH_ALLOW_TEMP=0 SWITCH_TIMEOUT=0 session-switcher durable.md 2>&1); rc=$?
+! grep -q 'temporary dirs' <<<"$out" && ok "a brief with durable paths passes the check" || { bad "durable brief passes"; echo "$out"; }
+[ "$rc" -eq 2 ] && grep -q 'still running in window sw-' <<<"$out" && grep -q 'raise SWITCH_TIMEOUT' <<<"$out" && grep -q 'tmux attach -t smoke' <<<"$out" \
+  && ok "a timeout exits 2 and says how to wait longer and how to attach" || { bad "timeout message (rc $rc)"; echo "$out"; }
+out=$(SWITCH_ALLOW_TEMP=1 SWITCH_TIMEOUT=0 session-switcher tempbrief.md 2>&1); rc=$?
+[ "$rc" -eq 2 ] && grep -q 'launching anyway' <<<"$out" && grep -q '^launched' <<<"$out" && ok "SWITCH_ALLOW_TEMP=1 warns and launches anyway" || { bad "SWITCH_ALLOW_TEMP=1 launches (rc $rc)"; echo "$out"; }
+out=$(SWITCH_TIMEOUT=2m session-switcher durable.md 2>&1); rc=$?
+[ "$rc" -eq 1 ] && grep -q 'whole number of seconds' <<<"$out" && ok "a non-numeric SWITCH_TIMEOUT is refused" || { bad "non-numeric SWITCH_TIMEOUT (rc $rc)"; echo "$out"; }
+session-switcher --help | grep -q 'SWITCH_TIMEOUT=180' && session-switcher --help | grep -q '240000 ms' && ok "--help gives the 180 s default and the Bash-tool timeout advice" || bad "--help timeout text"
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
