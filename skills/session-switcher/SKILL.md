@@ -10,10 +10,10 @@ Hands work to a fresh Claude Code session the way Orca does: the brief travels a
 ## Steps
 
 1. Write the brief to a file (for example `handoff.md`). Put everything the child needs in it; the child shares no context with you. Start it with a heading, not a `-`.
-2. Run:
+2. Run the command. It ships in this plugin as `${CLAUDE_PLUGIN_ROOT}/scripts/session-switcher`. When the skill is installed on its own instead of as a plugin, that path has no plugin directory in front of it: run the bare `session-switcher` from `PATH` instead.
 
 ```bash
-session-switcher handoff.md [workdir]
+"${CLAUDE_PLUGIN_ROOT}/scripts/session-switcher" handoff.md [workdir]
 ```
 
    Set `CLAUDE_FLAGS="--dangerously-skip-permissions"` when the child must use tools unattended. `SWITCH_TIMEOUT` (seconds, default 90) bounds the wait.

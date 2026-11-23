@@ -76,7 +76,7 @@ All such ideas were flagged `MODAL` and eliminated from the final shortlist.
 
 ## Validate Next
 1. **Safe Pick Validation (`session-worktree`):**
-   - Write a 40-line prototype: `bin/session-worktree <branch> <brief.md>`.
+   - Write a 40-line prototype: `scripts/session-worktree <branch> <brief.md>`.
    - Verify it creates `.worktrees/<branch>`, runs `claude --bg`, and deletes the worktree on clean `done.json` exit.
 2. **Moonshot Validation (`session-airspace`):**
    - Benchmark 3 simultaneous Claude instances under a constrained 4GB WSL config.

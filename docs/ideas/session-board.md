@@ -27,10 +27,10 @@ How might one person see and steer several live Claude Code sessions from inside
                      `claude agents` lists them. With --resume <session-id>, continues
                      that session in the background under the same ID.
 --session-id <uuid>  Use a specific session ID for the conversation.
---settings <file>    (already used by bin/session-switcher for the Stop hook)
+--settings <file>    (already used by scripts/session-switcher for the Stop hook)
 ```
 
-`claude agents` is a session registry. `claude attach` replaces `tmux attach`. If these work from Desktop, most of the tmux layer in `bin/session-switcher` is dead weight.
+`claude agents` is a session registry. `claude attach` replaces `tmux attach`. If these work from Desktop, most of the tmux layer in `scripts/session-switcher` is dead weight.
 
 ## Recommended Direction
 
@@ -45,7 +45,7 @@ Questions, each answered yes/no with evidence:
 3. From a Desktop-hosted parent: does `claude agents` list the child, and does `claude attach <id>` do anything useful when stdin is not a tty? If attach is unusable there, the return channel must carry the whole conversation, not just the first reply.
 4. Does the trust dialog still block a `--bg` child in a fresh folder? Headless, there is no pane to scrape.
 
-If 1 and 2 pass: rewrite `bin/session-switcher` on `--bg`, drop the tmux server, keep `done.json`. If 3 fails: keep tmux as the engine but never tell the user to `tmux attach`; route everything through files.
+If 1 and 2 pass: rewrite `scripts/session-switcher` on `--bg`, drop the tmux server, keep `done.json`. If 3 fails: keep tmux as the engine but never tell the user to `tmux attach`; route everything through files.
 
 ### 1. `session-switcher ls` (the board)
 
@@ -94,7 +94,7 @@ Out: `send`, lanes, fan-out, memory column (add when fan-out is on the table).
 
 ## Pointers
 
-- Script: `bin/session-switcher` (tmux engine, Stop hook via `--settings`, trust-dialog scrape, `-` guard).
+- Script: `scripts/session-switcher` (tmux engine, Stop hook via `--settings`, trust-dialog scrape, `-` guard).
 - Skill: `skills/session-switcher/SKILL.md`; linked into `~/.claude/skills/session-switcher`.
 - Probe brief: `examples/brief.md` (reply `PONG`).
 - Orca's original mechanism and the live capture: `~/ReverseEngineerAnything/reports/orca-cli-session-handoff.md`.

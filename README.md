@@ -39,9 +39,9 @@ PONG
 
 | Tool | Purpose | Interface |
 |---|---|---|
-| [`bin/session-switcher`](bin/session-switcher) | Start a new Claude Code session in tmux with a brief, wait for its first turn, and print the reply | `session-switcher <brief.md> [workdir]`<br>env: `CLAUDE_FLAGS`, `SWITCH_TIMEOUT` (90s), `SWITCH_SESSION` (`handoff`) |
-| [`bin/session-relay`](bin/session-relay) | Inspect and steer background sessions without a TTY or `tmux attach` | `list` · `send <window> "<prompt>"` · `read <window> [lines=25]` · `kill <window>` |
-| [`bin/session-airspace`](bin/session-airspace) | Pause the largest sessions under memory pressure and resume them when memory frees up | `status` · `hold <pid\|window>` · `release <pid\|window>` · `guard [--threshold 85] [--interval 5] [--once]` |
+| [`scripts/session-switcher`](scripts/session-switcher) | Start a new Claude Code session in tmux with a brief, wait for its first turn, and print the reply | `session-switcher <brief.md> [workdir]`<br>env: `CLAUDE_FLAGS`, `SWITCH_TIMEOUT` (90s), `SWITCH_SESSION` (`handoff`) |
+| [`scripts/session-relay`](scripts/session-relay) | Inspect and steer background sessions without a TTY or `tmux attach` | `list` · `send <window> "<prompt>"` · `read <window> [lines=25]` · `kill <window>` |
+| [`scripts/session-airspace`](scripts/session-airspace) | Pause the largest sessions under memory pressure and resume them when memory frees up | `status` · `hold <pid\|window>` · `release <pid\|window>` · `guard [--threshold 85] [--interval 5] [--once]` |
 
 All three tools work on the same tmux session (`$SWITCH_SESSION`, default `handoff`). That shared session is how they cooperate.
 
@@ -122,7 +122,7 @@ flowchart LR
 
 ```bash
 git clone https://github.com/z0rd0n88/session-stickler ~/session-stickler
-export PATH="$HOME/session-stickler/bin:$PATH"       # add to your shell rc
+export PATH="$HOME/session-stickler/scripts:$PATH"   # add to your shell rc
 
 # Optional: let Claude Code discover the skills
 mkdir -p ~/.claude/skills
@@ -130,6 +130,8 @@ for s in session-switcher session-relay session-airspace; do
   ln -s ~/session-stickler/skills/$s ~/.claude/skills/$s
 done
 ```
+
+The commands live in `scripts/`, not `bin/`, because claude.ai refuses to install a plugin that has a top-level `bin/` directory. Installed as a plugin, the skills run them by path (`${CLAUDE_PLUGIN_ROOT}/scripts/<name>`) and they are not on `PATH`; add the `export PATH` line above if you also want to type them yourself.
 
 ## Usage
 
@@ -188,7 +190,7 @@ These trade-offs are deliberate and documented in the code and skills:
 
 ```text
 session-stickler/
-├── bin/
+├── scripts/
 │   ├── session-switcher      # spawn a child session, return its first reply
 │   ├── session-relay         # list / send / read / kill tmux-hosted sessions
 │   └── session-airspace      # RAM monitor + SIGSTOP/SIGCONT holding patterns

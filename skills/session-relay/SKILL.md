@@ -9,18 +9,20 @@ description: Headless and Claude Desktop-friendly terminal bridge for managing b
 
 ## Quick Start
 
+The command ships in this plugin as `${CLAUDE_PLUGIN_ROOT}/scripts/session-relay`; run it by that path, as below. When the skill is installed on its own instead of as a plugin, that path has no plugin directory in front of it: run the bare `session-relay` from `PATH` instead.
+
 ```bash
 # List active sessions and their current terminal preview
-session-relay list
+"${CLAUDE_PLUGIN_ROOT}/scripts/session-relay" list
 
 # Send follow-up prompt to a session without attaching
-session-relay send 1 "Run pytest and summarize failures"
+"${CLAUDE_PLUGIN_ROOT}/scripts/session-relay" send 1 "Run pytest and summarize failures"
 
 # Read the latest terminal output from a session
-session-relay read 1 30
+"${CLAUDE_PLUGIN_ROOT}/scripts/session-relay" read 1 30
 
 # Terminate a finished session
-session-relay kill 1
+"${CLAUDE_PLUGIN_ROOT}/scripts/session-relay" kill 1
 ```
 
 ## Why It Matters
