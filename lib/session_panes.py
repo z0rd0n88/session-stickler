@@ -167,6 +167,10 @@ def cmd_list():
             state = "starting" if trans_t is None else "working"
         elif trans_t is not None and trans_t > done_t + 1:
             state = "working"
+        elif footer_busy(f"{sess}:{idx}"):
+            # The 1 s slack above (the transcript gets a last write just after the Stop hook) hides
+            # a turn that starts within a second of the last one ending; the footer does not.
+            state = "working"
         else:
             state = "idle"
         rss = sum(rss_kb(p) for p in tree(cpid, kids)) // 1024
@@ -175,6 +179,16 @@ def cmd_list():
         print("\t".join(str(v) for v in (
             f"{sess}:{idx}", name, pane_pid, cpid, wrapped, state, rss,
             int(now - started), int(now - last_change), sdir, one_line(msg) or "-")))
+
+
+def footer_busy(target):
+    """True while Claude Code's footer reads "esc to interrupt", which it shows exactly while a turn runs."""
+    try:
+        screen = subprocess.run(["tmux", "capture-pane", "-p", "-t", target],
+                                capture_output=True, text=True, timeout=5, check=False).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "esc to interrupt" in "\n".join(screen.splitlines()[-30:])
 
 
 def cmd_ram():

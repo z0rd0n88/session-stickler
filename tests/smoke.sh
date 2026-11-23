@@ -68,6 +68,13 @@ tmux send-keys -t "smoke:1" 2 Enter   # answer it ("2. No"), as a person would
 for _ in $(seq 1 25); do session-relay last "$A" 2>/dev/null | grep -q '^echo: denied' && break; sleep 0.2; done   # its turn has ended
 reply=$(session-relay send "$A" --wait=15 'after the dialog' 2>&1)
 grep -q 'echo: after the dialog' <<<"$reply" && ok "send works again once the dialog is answered" || { bad "send after the dialog"; echo "$reply"; }
+# F10: a turn that starts within a second of the last one ending must read as working, not idle.
+# Typed straight into the pane (send pauses before Enter), so the turn starts inside that second.
+reply=$(session-relay send "$A" --wait=15 'just before' 2>&1)
+tmux send-keys -t "smoke:1" -l 'SLOW right after'; tmux send-keys -t "smoke:1" Enter; sleep 0.3
+st=$(session-relay list | awk -v a="$A" '$2 == a {print $3}')
+[ "$st" = working ] && ok "a turn started right after the last one reads as working" || bad "state right after a new prompt is '$st', not working"
+for _ in $(seq 1 40); do session-relay last "$A" | grep -q 'echo: SLOW right after' && break; sleep 0.2; done
 
 echo "session-airspace"
 read -r _ _ apid _ < <(session-relay list >/dev/null; python3 "$ROOT/lib/session_panes.py" list | awk -F'\t' -v a="$A" '$2 == a {print $1, $2, $4, $5}')
