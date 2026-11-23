@@ -49,6 +49,16 @@ check "last prints the full reply" bash -c "session-relay last $A | grep -q 'ech
 check "read shows the pane" bash -c "session-relay read $A 40 | grep -q 'fake claude ready'"
 check "bare index resolves in \$SWITCH_SESSION" session-relay last 1
 check "unknown target is refused" bash -c "! session-relay last nosuch"
+session-relay send "$A" 'ASK-PERMISSION run a command' >/dev/null 2>&1
+ADIR=$(python3 "$ROOT/lib/session_panes.py" list | awk -F'\t' -v a="$A" '$2 == a {print $10}')
+for _ in $(seq 1 25); do session-relay read "$A" 5 | grep -q 'Esc to cancel' && break; sleep 0.2; done
+out=$(session-relay send "$A" 'what time is it?' 2>&1); rc=$?
+[ "$rc" -eq 5 ] && grep -q "showing a dialog" <<<"$out" && ok "send refuses a child showing a permission prompt (exit 5)" || { bad "send refuses a dialog (rc $rc)"; echo "$out"; }
+sleep 1; [ ! -e "$ADIR/approved" ] && ok "the prompt was not approved by send" || bad "send approved the permission prompt"
+tmux send-keys -t "smoke:1" 2 Enter   # answer it ("2. No"), as a person would
+for _ in $(seq 1 25); do session-relay last "$A" 2>/dev/null | grep -q '^echo: denied' && break; sleep 0.2; done   # its turn has ended
+reply=$(session-relay send "$A" --wait=15 'after the dialog' 2>&1)
+grep -q 'echo: after the dialog' <<<"$reply" && ok "send works again once the dialog is answered" || { bad "send after the dialog"; echo "$reply"; }
 
 echo "session-airspace"
 read -r _ _ apid _ < <(session-relay list >/dev/null; python3 "$ROOT/lib/session_panes.py" list | awk -F'\t' -v a="$A" '$2 == a {print $1, $2, $4, $5}')

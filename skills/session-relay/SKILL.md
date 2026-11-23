@@ -37,6 +37,7 @@ Every command works as usual. `kill` warns: run-job treats a killed child as a c
 1. `session-relay list`. Pick the child; check its STATE. `idle` is ready; `working` will queue your prompt; `held` must be released first (`session-airspace release <target>`).
 2. `session-relay send <target> --wait "<prompt>"`. Write the prompt so it stands alone. Multi-line prompts are fine. Give the Bash tool a timeout longer than `--wait` (default 600 s).
 3. Relay the printed reply to the user. On exit 2 (timeout), the child is still working: check later with `session-relay last <target>`.
+4. Exit 5 means the child is showing a dialog (a permission prompt, the trust dialog, a question). Nothing was sent: pressing Enter there would pick the highlighted option, and on a permission prompt that approves the command. Show the user the dialog (`session-relay read <target>`) and let them answer it in a terminal; do not answer it for them.
 
 ## States
 

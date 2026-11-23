@@ -18,6 +18,8 @@
 # "socket/session:index" on another (blast-off: blast-off-<job>/job-<job>:3). The window name
 # session-switcher prints (sw-ab12cd) and a bare window index in $SWITCH_SESSION (default
 # handoff) also work.
+# send exits 3 if the child is held, 4 for a blast-off child without --force, 5 if it shows a
+# dialog (Enter would answer it), 2 on a --wait timeout.
 # env: SWITCH_SESSION=handoff   RELAY_WAIT=600 (default --wait seconds)
 set -euo pipefail
 
@@ -25,7 +27,17 @@ LIB="$(cd "$(dirname "$(readlink -f "$0")")/../lib" && pwd)"
 # shellcheck source=lib/session-common.sh
 . "$LIB/session-common.sh"
 
-usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; }
+
+# dialog_line: print the footer line of a choice dialog on the child's screen (a permission prompt,
+# the trust dialog, a question menu) and succeed; fail when there is none. Those dialogs end with
+# "Esc to cancel" or "Enter to confirm · Esc to cancel" at the start of a line, which normal replies
+# and the input box do not. A dialog takes Enter as "choose the highlighted option", so `send` must
+# never press Enter while one is open: on a permission prompt that option is "1. Yes".
+dialog_line() {
+  tm capture-pane -p -t "$T_PANE_ID" 2>/dev/null | tail -n 30 \
+    | grep -m1 -E '^[[:space:]]*(Enter to [[:alpha:]]+ · )?Esc to cancel'
+}
 
 cmd_list() {
   local rows
@@ -76,6 +88,14 @@ cmd_send() {
     exit 4
   fi
 
+  local dlg
+  if dlg=$(dialog_line); then
+    echo "error: $T_TARGET is showing a dialog (${dlg#"${dlg%%[![:space:]]*}"}); nothing was sent." >&2
+    echo "Enter would pick its highlighted option, which on a permission prompt approves the command." >&2
+    echo "See it with: session-relay read $T_TARGET. Answer it in a terminal (tmux -L $T_SOCKET attach -t $(sed 's|^.*/||; s|:[^:]*$||' <<<"$T_TARGET"))." >&2
+    exit 5
+  fi
+
   # A turn ends in done.json, or (blast-off's StopFailure hook) in failed.json.
   local done_file="$T_DIR/done.json" failed_file="$T_DIR/failed.json" before=""
   before=$(stat -c "%y %s" "$done_file" "$failed_file" 2>/dev/null || true)
@@ -87,6 +107,12 @@ cmd_send() {
   printf '%s' "$text" | tm load-buffer -b "$buf" -
   tm paste-buffer -p -d -b "$buf" -t "$T_PANE_ID"
   sleep 0.5   # let the TUI finish taking the paste before the submitting Enter
+  # A dialog can open between the check above and now (the child was mid-turn). Look again.
+  if dlg=$(dialog_line); then
+    echo "error: $T_TARGET opened a dialog while the prompt was being pasted; Enter was NOT pressed." >&2
+    echo "See it with: session-relay read $T_TARGET. Answer it in a terminal, then send again." >&2
+    exit 5
+  fi
   tm send-keys -t "$T_PANE_ID" Enter
   echo "sent to $T_TARGET ($T_NAME): $(printf '%s' "$text" | head -c 120 | tr '\n' ' ')"
 
