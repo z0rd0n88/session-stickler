@@ -11,7 +11,7 @@ WORK=$(mktemp -d)
 export TMUX_TMPDIR="$WORK/tmux"; mkdir -p "$TMUX_TMPDIR"   # private tmux server
 export PATH="$ROOT/tests/fake-bin:$ROOT/bin:$PATH"
 export SWITCH_SESSION=smoke XDG_RUNTIME_DIR="$WORK/run"; mkdir -p "$XDG_RUNTIME_DIR"
-unset TMUX
+unset TMUX CLAUDE_CODE_ENTRYPOINT   # a Desktop parent would put the switcher in desktop mode
 pass=0; fail=0
 ok()  { echo "  ok   $1"; pass=$((pass + 1)); }
 bad() { echo "  FAIL $1"; fail=$((fail + 1)); }
