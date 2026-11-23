@@ -43,6 +43,15 @@ grep -q 'echo: Enter C-c Escape' <<<"$reply" && ok "key names are sent as text" 
 check "last prints the full reply" bash -c "session-relay last $A | grep -q 'echo: Enter C-c Escape'"
 check "read shows the pane" bash -c "session-relay read $A 40 | grep -q 'fake claude ready'"
 check "bare index resolves in \$SWITCH_SESSION" session-relay last 1
+session-relay send "$A" 'SLOW first question' >/dev/null
+reply=$(session-relay send "$A" --wait=20 'second question' 2>&1)
+grep -q 'echo: second question' <<<"$reply" && ! grep -q 'echo: SLOW' <<<"$reply" && grep -q 'waiting for it to finish' <<<"$reply" \
+  && ok "send --wait to a busy child waits its turn and returns its own reply" || { bad "send --wait to a busy child"; echo "$reply"; }
+session-relay send "$A" 'SLOW third question' >/dev/null
+out=$(session-relay send "$A" --wait=1 'never sent' 2>&1); rc=$?
+[ "$rc" -eq 2 ] && grep -q 'NOT sent' <<<"$out" && ok "a --wait that runs out before the turn ends sends nothing (exit 2)" || { bad "busy timeout (rc $rc)"; echo "$out"; }
+for _ in $(seq 1 30); do session-relay last "$A" | grep -q 'echo: SLOW third' && break; sleep 0.2; done
+sleep 1; ! session-relay last "$A" | grep -q 'never sent' && ok "the prompt that timed out was not typed in" || bad "the timed-out prompt was typed in"
 check "unknown target is refused" bash -c "! session-relay last nosuch"
 session-relay send "$A" 'ASK-PERMISSION run a command' >/dev/null 2>&1
 ADIR=$(python3 "$ROOT/lib/session_panes.py" list | awk -F'\t' -v a="$A" '$2 == a {print $10}')
