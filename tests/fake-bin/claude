@@ -6,7 +6,8 @@ on the hook's stdin. Then it answers each prompt typed into its pane the same wa
 env: FAKE_MB=0 (memory to hold, to give children different sizes)  FAKE_DELAY=0.5 (seconds per reply)
      FAKE_FAIL=<error> (end the first turn through the StopFailure hook instead, as an API error does)
 A prompt containing ASK-PERMISSION shows a permission prompt first; the next line typed answers it
-(empty or "1" = approved), recorded as <dir>/approved or <dir>/denied.
+(empty or "1" = approved), recorded as <dir>/approved or <dir>/denied. A prompt containing SLOW
+takes 3 s. While a turn runs the screen shows "esc to interrupt", as Claude Code's footer does.
 It also starts one `sleep` child, so holds can be checked across a process tree."""
 import json
 import os
@@ -42,8 +43,12 @@ def answer(text, error=None):
         open(os.path.join(os.path.dirname(settings), verdict), "w").write(choice)
         print("\x1b[2J\x1b[H", end="", flush=True)   # the dialog goes away once answered, as in Claude Code
         text = f"{verdict} ({text})"
-    for _ in range(int(delay * 10)):   # small steps, so time spent held is lost, as with real work
+    # Claude Code shows "esc to interrupt" in its footer exactly while a turn runs; the turn's end
+    # redraws the screen without it.
+    print("✻ Working… (esc to interrupt)", flush=True)
+    for _ in range(int((3 if "SLOW" in text else delay) * 10)):   # small steps, so time held is lost
         time.sleep(0.1)
+    print("\x1b[2J\x1b[H", end="", flush=True)
     if error:
         print("API Error: " + error, flush=True)
         event = {"session_id": "fake", "transcript_path": transcript, "error": error}

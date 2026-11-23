@@ -6,7 +6,8 @@
 #   session-relay list                          One line per child: target, runner, state, memory,
 #                                               last reply
 #   session-relay send <target> [--wait[=SECS]] [--force] <prompt|-f file|->
-#                                               Type a prompt into a child; --wait prints its reply.
+#                                               Type a prompt into a child; --wait waits out a busy
+#                                               child, sends, and prints the reply to this prompt.
 #                                               A blast-off child needs --force (its runner drives it)
 #   session-relay last <target>                 Print the child's last full reply (from done.json)
 #   session-relay read <target> [lines]         Print the last N lines of the child's screen (25)
@@ -27,7 +28,7 @@ LIB="$(cd "$(dirname "$(readlink -f "$0")")/../lib" && pwd)"
 # shellcheck source=lib/session-common.sh
 . "$LIB/session-common.sh"
 
-usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # dialog_line: print the footer line of a choice dialog on the child's screen (a permission prompt,
 # the trust dialog, a question menu) and succeed; fail when there is none. Those dialogs end with
@@ -37,6 +38,17 @@ usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; }
 dialog_line() {
   tm capture-pane -p -t "$T_PANE_ID" 2>/dev/null | tail -n 30 \
     | grep -m1 -E '^[[:space:]]*(Enter to [[:alpha:]]+ · )?Esc to cancel'
+}
+
+# busy: the child is in a turn. Two signals, because each alone has a blind spot: the state from
+# done.json and the transcript (which reads `idle` for about a second after a turn ends, even if a
+# new prompt has just started the next one), and Claude Code's "esc to interrupt" footer, which is
+# on screen exactly while a turn runs (a UI change could remove it). Refreshes T_STATE.
+busy() {
+  resolve_target "$target" || exit 1
+  [ "$T_STATE" != held ] || { echo "error: $T_TARGET was held by session-airspace while waiting" >&2; exit 3; }
+  [ "$T_STATE" = working ] || [ "$T_STATE" = starting ] \
+    || [ "$(tm capture-pane -p -t "$T_PANE_ID" 2>/dev/null | tail -n 30 | grep -c 'esc to interrupt')" -gt 0 ]
 }
 
 cmd_list() {
@@ -88,7 +100,23 @@ cmd_send() {
     exit 4
   fi
 
-  local dlg
+  # With --wait, the reply must be to THIS prompt. A busy child would end its current turn first,
+  # and that turn's Stop event would be taken for the answer (or, when Claude Code folds the queued
+  # prompt into the running turn, the answer would be mixed with it). So wait for the turn to end,
+  # then send. One --wait budget covers both waits. Without --wait the prompt is queued as before.
+  local deadline=$((SECONDS + ${wait:-0})) dlg
+  if [ -n "$wait" ] && busy; then
+    echo "$T_TARGET is in a turn; waiting for it to finish before sending (up to ${wait}s)" >&2
+    while busy; do
+      if dlg=$(dialog_line); then break; fi   # reported just below
+      if [ "$SECONDS" -ge "$deadline" ]; then
+        echo "timeout after ${wait}s; $T_TARGET is still busy, so the prompt was NOT sent. Check: session-relay read $T_TARGET" >&2
+        exit 2
+      fi
+      sleep 1
+    done
+  fi
+
   if dlg=$(dialog_line); then
     echo "error: $T_TARGET is showing a dialog (${dlg#"${dlg%%[![:space:]]*}"}); nothing was sent." >&2
     echo "Enter would pick its highlighted option, which on a permission prompt approves the command." >&2
@@ -117,8 +145,9 @@ cmd_send() {
   echo "sent to $T_TARGET ($T_NAME): $(printf '%s' "$text" | head -c 120 | tr '\n' ' ')"
 
   [ -n "$wait" ] || return 0
-  local i now
-  for ((i = 0; i < wait; i++)); do
+  local now first=1
+  while [ "$first" = 1 ] || [ "$SECONDS" -lt "$deadline" ]; do   # --wait=0 still takes one look
+    first=0
     now=$(stat -c "%y %s" "$done_file" "$failed_file" 2>/dev/null || true)
     if [ -n "$now" ] && [ "$now" != "$before" ] && { [ -s "$done_file" ] || [ -s "$failed_file" ]; }; then
       sleep 0.2   # session-switcher's hook writes done.json with `cat >`; give it a moment to finish
@@ -128,7 +157,7 @@ cmd_send() {
     fi
     sleep 1
   done
-  echo "timeout after ${wait}s; $T_TARGET is still working. Check later: session-relay last $T_TARGET" >&2
+  echo "timeout after ${wait}s; $T_TARGET is still working on the prompt. Check later: session-relay last $T_TARGET" >&2
   exit 2
 }
 
