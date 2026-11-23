@@ -172,7 +172,7 @@ def one_line(text, width=70):
 
 
 def sockets():
-    """(name, path) of every socket in this user's tmux socket dir, "default" first."""
+    """Names of every socket in this user's tmux socket dir, "default" first."""
     base = os.path.join(os.environ.get("TMUX_TMPDIR") or "/tmp", f"tmux-{os.getuid()}")
     try:
         names = sorted(os.listdir(base), key=lambda n: (n != "default", n))
@@ -207,23 +207,28 @@ def runner_of(socket, sess, sdir):
 
 
 def cmd_list():
-    fmt = "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_pid}\t#{pane_id}"
+    # A window name may hold tabs and newlines (tmux escapes every other control character, and
+    # session names in full), so it goes last and each row starts with a token no name can hold.
+    # -u keeps the tabs: under a non-UTF-8 locale tmux prints every tab as "_".
+    tok = os.urandom(8).hex()
+    fmt = tok + "\t#{session_name}\t#{window_index}\t#{pane_pid}\t#{pane_id}\t#{window_name}"
     kids = proc_children()
     now = time.time()
     for sock in sockets():
         try:
-            out = subprocess.run(["tmux", "-L", sock, "list-panes", "-a", "-F", fmt],
+            out = subprocess.run(["tmux", "-u", "-L", sock, "list-panes", "-a", "-F", fmt],
                                  capture_output=True, text=True, check=False, timeout=5).stdout
         except FileNotFoundError:
             return
         except subprocess.TimeoutExpired:
             continue
         # A stale socket (no server behind it) just yields no rows: its error went to the pipe.
-        for row in out.splitlines():
-            parts = row.split("\t")
-            if len(parts) != 5 or not parts[3].isdigit():
+        for row in out.split(tok + "\t")[1:]:
+            parts = row.rstrip("\n").split("\t", 4)
+            if len(parts) != 5 or not parts[2].isdigit():
                 continue
-            sess, idx, name, pane_pid, pane_id = parts
+            sess, idx, pane_pid, pane_id, name = parts
+            name = name.replace("\t", " ").replace("\n", " ")   # one row per child, every field in place
             found = find_claude(int(pane_pid), kids)
             if not found:
                 continue
@@ -239,6 +244,11 @@ def cmd_list():
                 state = "starting" if trans_t is None else "working"
             elif trans_t is not None and trans_t > ended + 1:
                 state = "working"
+            elif footer_busy(sock, pane_id):
+                # The 1 s slack above (the transcript gets a last write just after the Stop hook)
+                # hides a turn that starts within a second of the last one ending; the footer does
+                # not. A new turn after a failed one is working too: the footer shows only in a turn.
+                state = "working"
             else:
                 state = "failed" if is_failed else "idle"
             rss = sum(rss_kb(p) for p in tree(cpid, kids)) // 1024
@@ -251,6 +261,17 @@ def cmd_list():
                 target, name, pane_pid, cpid, wrapped, state, rss,
                 int(now - started), int(now - last_change), sdir, sock, pane_id, runner, job,
                 one_line(msg) or "-")))
+
+
+def footer_busy(socket, pane_id):
+    """True while Claude Code's footer reads "esc to interrupt", which it shows exactly while a turn
+    runs. Asks the child's own server (-L socket) for its exact pane."""
+    try:
+        screen = subprocess.run(["tmux", "-L", socket, "capture-pane", "-p", "-t", pane_id],
+                                capture_output=True, text=True, timeout=5, check=False).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "esc to interrupt" in "\n".join(screen.splitlines()[-30:])
 
 
 def cmd_ram():

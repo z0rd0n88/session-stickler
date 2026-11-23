@@ -73,6 +73,13 @@ tmux send-keys -t "smoke:1" 2 Enter   # answer it ("2. No"), as a person would
 for _ in $(seq 1 25); do session-relay last "$A" 2>/dev/null | grep -q '^echo: denied' && break; sleep 0.2; done   # its turn has ended
 reply=$(session-relay send "$A" --wait=15 'after the dialog' 2>&1)
 grep -q 'echo: after the dialog' <<<"$reply" && ok "send works again once the dialog is answered" || { bad "send after the dialog"; echo "$reply"; }
+# F10: a turn that starts within a second of the last one ending must read as working, not idle.
+# Typed straight into the pane (send pauses before Enter), so the turn starts inside that second.
+reply=$(session-relay send "$A" --wait=15 'just before' 2>&1)
+tmux send-keys -t "smoke:1" -l 'SLOW right after'; tmux send-keys -t "smoke:1" Enter; sleep 0.3
+st=$(python3 "$ROOT/lib/session_panes.py" list | awk -F'\t' -v a="$A" '$2 == a {print $6}')
+[ "$st" = working ] && ok "a turn started right after the last one reads as working" || bad "state right after a new prompt is '$st', not working"
+for _ in $(seq 1 40); do session-relay last "$A" | grep -q 'echo: SLOW right after' && break; sleep 0.2; done
 
 echo "session-airspace"
 read -r _ _ apid _ < <(session-relay list >/dev/null; python3 "$ROOT/lib/session_panes.py" list | awk -F'\t' -v a="$A" '$2 == a {print $1, $2, $4, $5}')
@@ -188,6 +195,14 @@ out=$(session-relay kill "$C1" 2>&1); rc=$?
 [ "$rc" -eq 4 ] && grep -q "blast-off stop $JOB" <<<"$out" && ok "kill refuses and names blast-off stop <job-dir>" || { bad "kill refuses and names blast-off stop <job-dir> (rc $rc)"; echo "$out"; }
 c1pid=$(python3 "$ROOT/lib/session_panes.py" list | awk -F'\t' -v c="$C1" '$1 == c {print $4}')
 [ -d "/proc/$c1pid" ] && ok "the refused kill left claude running" || bad "the refused kill left claude running"
+# F10 on a private server: the footer must be read from the child's own server and pane. Child 1
+# is window 1 here and window 1 on the default server is also a fake claude, so reading the wrong
+# server would see an idle screen.
+c1pane=$(python3 "$ROOT/lib/session_panes.py" list | awk -F'\t' -v c="$C1" '$1 == c {print $12}')
+tmux -L $BO send-keys -t "$c1pane" -l 'SLOW on its own server'; tmux -L $BO send-keys -t "$c1pane" Enter; sleep 0.3
+st=$(python3 "$ROOT/lib/session_panes.py" list | awk -F'\t' -v c="$C1" '$1 == c {print $6}')
+[ "$st" = working ] && ok "a new turn on a private server reads as working (footer from its own pane)" || bad "state of a new turn on a private server is '$st', not working"
+for _ in $(seq 1 25); do session-relay last "$C1" 2>/dev/null | grep -q 'SLOW on its own server' && break; sleep 0.2; done
 check "hold refuses a blast-off child without --force" bash -c "! session-airspace hold $C1"
 check "status marks it skipped by the guard" bash -c "session-airspace status | grep -q \"^$C1 .*guard skips\""
 out=$(AIRSPACE_TEST_PCT=95 session-airspace guard --once 2>&1)
