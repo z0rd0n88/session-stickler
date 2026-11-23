@@ -45,7 +45,7 @@ sent to handoff:1 (sw-Xa91Qd): Now run the tests and summarise failures
 
 | Tool | Purpose | Interface |
 |---|---|---|
-| [`bin/session-switcher`](bin/session-switcher) | Start a new Claude Code session in tmux with a brief, wait for its first turn, and print the reply | `session-switcher <brief.md> [workdir]`<br>env: `CLAUDE_FLAGS`, `SWITCH_TIMEOUT` (90s), `SWITCH_SESSION` (`handoff`), `SWITCH_RAM_WARN` (85) |
+| [`bin/session-switcher`](bin/session-switcher) | Start a new Claude Code session in tmux with a brief, wait for its first turn, and print the reply. From Claude Desktop it opens the child in Desktop instead (no reply back) | `session-switcher <brief.md> [workdir]`<br>env: `CLAUDE_FLAGS`, `SWITCH_TIMEOUT` (90s), `SWITCH_SESSION` (`handoff`), `SWITCH_MODE` (`desktop`/`tmux`), `SWITCH_RAM_WARN` (85) |
 | [`bin/session-relay`](bin/session-relay) | See and steer child sessions without a TTY or `tmux attach` | `list` · `send <target> [--wait[=SECS]] [--force] "<prompt>"` · `last <target>` · `read <target> [lines=25]` · `kill <target>` |
 | [`bin/session-airspace`](bin/session-airspace) | Hold the largest children under memory pressure and release them when memory frees up | `status` · `hold [--force] <target>` · `release <target>` · `guard [--threshold 85] [--interval 5] [--once]` |
 

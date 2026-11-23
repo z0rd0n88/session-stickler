@@ -5,15 +5,22 @@
 # Usage:  session-switcher <brief.md> [workdir]
 #   env:  CLAUDE_FLAGS="--dangerously-skip-permissions"   SWITCH_TIMEOUT=90   SWITCH_SESSION=handoff
 #         SWITCH_RAM_WARN=85 (warn before launching when RAM use is at or above this percent)
+#         SWITCH_MODE=desktop|tmux (default: desktop when the parent runs in Claude Desktop; desktop opens the child there, no reply back)
 # Follow up:  session-relay send <window> --wait "..."    Watch:  session-relay read <window>
 set -euo pipefail
-case "${1:-}" in -h|--help|"") sed -n 2,8p "$0"; exit 0;; esac
+case "${1:-}" in -h|--help|"") sed -n 2,9p "$0"; exit 0;; esac
 BRIEF="$1"
 WORKDIR="$(cd "${2:-$PWD}" && pwd)"
 TIMEOUT="${SWITCH_TIMEOUT:-90}"
 SESSION="${SWITCH_SESSION:-handoff}"
-command -v claude >/dev/null || { echo "claude not on PATH" >&2; exit 1; }
-command -v tmux   >/dev/null || { echo "tmux not on PATH" >&2; exit 1; }
+MODE="${SWITCH_MODE:-tmux}"
+[ -z "${SWITCH_MODE:-}" ] && [ "${CLAUDE_CODE_ENTRYPOINT:-}" = claude-desktop ] && MODE=desktop
+case "$MODE" in desktop|tmux) ;; *) echo "SWITCH_MODE must be desktop or tmux, got: $MODE" >&2; exit 1;; esac
+if [ "$MODE" = tmux ]; then
+  command -v claude >/dev/null || { echo "claude not on PATH" >&2; exit 1; }
+  command -v tmux   >/dev/null || { echo "tmux not on PATH" >&2; exit 1; }
+fi
+command -v python3 >/dev/null || { echo "python3 not on PATH" >&2; exit 1; }
 test -s "$BRIEF" || { echo "brief missing or empty: $BRIEF" >&2; exit 1; }
 case "$(head -c1 "$BRIEF")" in -) echo "brief must not start with '-' (claude would parse it as a flag)" >&2; exit 1;; esac
 
@@ -27,6 +34,28 @@ DIR=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/switch.XXXXXX")
 ID=${DIR##*/}
 NAME="sw-${ID#switch.}"   # window name: stable, unlike an index; no '.', which tmux reads as a pane
 PARENT="${CLAUDE_CODE_SESSION_ID:-$PPID}"
+
+# Desktop mode: Desktop sessions take no --settings, so there is no Stop-hook return channel.
+# Open Desktop's new-session page via a claude://code/new link and return. The brief stays on disk
+# and the link carries only a pointer to it (no URL-length or quoting limits on the brief).
+# Desktop only pre-fills the prompt: tested 2026-11-23 on WSL, it ignored folder= in both the
+# \\wsl.localhost UNC and the Linux-path form and kept the last-used environment, and it does not
+# send the prompt. So the workdir travels inside the prompt and the user picks the environment.
+# ponytail: replace with a documented handoff if Desktop grows one that sets folder and sends.
+if [ "$MODE" = desktop ]; then
+  cp "$BRIEF" "$DIR/brief.md"
+  enc() { python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"; }
+  URL="claude://code/new?q=$(enc "Work in $WORKDIR. Read $DIR/brief.md and follow it. It is your whole brief; you share no context with the session that wrote it.")"
+  echo "asked Claude Desktop to open  workdir=$WORKDIR  brief=$DIR/brief.md"
+  echo "in Desktop: pick an environment that can reach $WORKDIR, then press Enter to send the pre-filled prompt"
+  echo "if no window appears, open this link: $URL"
+  # opener failures are not fatal: the link above is the fallback (explorer.exe exits 1 even on success)
+  if [ -n "${WSL_DISTRO_NAME:-}" ]; then explorer.exe "$URL" || true
+  elif [ "$(uname)" = Darwin ]; then open "$URL" || true
+  else xdg-open "$URL" || true; fi
+  echo "no reply comes back in desktop mode; continue in Desktop (SWITCH_MODE=tmux gets the reply back)"
+  exit 0
+fi
 
 # 2. return channel: Claude pipes the Stop event JSON into the hook; it lands as done.json
 printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"cat > %s/done.json"}]}]}}\n' "$DIR" > "$DIR/settings.json"
