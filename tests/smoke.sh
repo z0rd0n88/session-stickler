@@ -140,9 +140,12 @@ session-airspace hold "$B" >/dev/null
 
 echo "session-relay kill"
 bpid=$(python3 "$ROOT/lib/session_panes.py" list | awk -F'\t' -v b="$B" '$2 == b {print $4}')
+spane=$(tmux split-window -dP -F '#{pane_id}' -t "smoke:$B" "sleep 1000")   # a pane the user split off beside it
 check "kill closes a held child" session-relay kill "$B"
 sleep 1
 [ ! -d "/proc/$bpid" ] || [ "$(state_of "$bpid")" = Z ] && ok "its claude process is gone" || bad "its claude process is gone (state $(state_of "$bpid"))"
+tmux list-panes -a -F '#{pane_id}' | grep -qx "$spane" && ok "kill leaves a pane split off beside the child" || bad "kill leaves a pane split off beside the child"
+tmux kill-pane -t "$spane" 2>/dev/null
 
 # blast-off: a private server per job, each child a window running claude under systemd-run --scope,
 # its dir named blast-off-<job>-child.XXXXXX with Stop and StopFailure hooks (blast-off lib/child.sh).

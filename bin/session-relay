@@ -188,14 +188,16 @@ cmd_kill() {
     echo "warning: $T_TARGET is a run-job child; run-job treats a killed child as a crash and starts the next one" >&2
   fi
   [ "$T_STATE" = held ] && release_tree "$T_CLAUDE"   # a stopped process cannot act on SIGHUP
-  tm kill-window -t "$T_PANE_ID"
+  # Only the child's pane: a pane the user split off beside it is not ours. A last pane takes its
+  # window with it, remain-on-exit or not.
+  tm kill-pane -t "$T_PANE_ID"
   # claude exits on the hangup but takes a few seconds to shut down; wait so the caller knows.
   local i
   for ((i = 0; i < 15; i++)); do
     [ -d "/proc/$T_CLAUDE" ] && [ "$(proc_state "$T_CLAUDE")" != Z ] || { echo "closed $T_TARGET ($T_NAME)"; return 0; }
     sleep 1
   done
-  echo "closed window $T_TARGET, but claude (pid $T_CLAUDE) is still shutting down after 15s" >&2
+  echo "closed $T_TARGET, but claude (pid $T_CLAUDE) is still shutting down after 15s" >&2
 }
 
 case "${1:-}" in
