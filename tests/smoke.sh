@@ -29,10 +29,15 @@ A=$(sed -n 's/^launched  window=\(sw-[^ ]*\).*/\1/p' <<<"$out")
 [ -n "$A" ] && ok "names the window ($A)" || bad "names the window"
 grep -q "session-relay send $A --wait" <<<"$out" && ok "prints the relay follow-up" || bad "prints the relay follow-up"
 printf 'second brief\n' > brief2.md
-out=$(FAKE_MB=5 SWITCH_TIMEOUT=20 session-switcher brief2.md 2>&1)
+# A new window takes its environment from tmux (the server the first launch started, which holds
+# FAKE_MB=40), not from session-switcher's caller, so set child B's size in the session's environment.
+tmux set-environment -t smoke FAKE_MB 5
+out=$(SWITCH_TIMEOUT=20 session-switcher brief2.md 2>&1)
 B=$(sed -n 's/^launched  window=\(sw-[^ ]*\).*/\1/p' <<<"$out")
 
 echo "session-relay"
+tmux new-session -d -s other -n $'tab\there\nand newline' 'sleep 1000'   # an unrelated window with a tab and a newline in its name
+check "a tab or newline in another window's name does not break discovery" bash -c "session-relay list | grep -q '$A ' && session-airspace status | grep -q '$A '"
 list=$(session-relay list)
 grep -q "$A .*idle" <<<"$list" && ok "list shows child A idle" || { bad "list shows child A idle"; echo "$list"; }
 grep -q 'echo: first brief' <<<"$list" && ok "list shows the last reply" || bad "list shows the last reply"

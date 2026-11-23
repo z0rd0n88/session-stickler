@@ -1,6 +1,6 @@
 ---
 name: session-airspace
-description: Pause and resume Claude child sessions (from session-switcher or run-job) to keep RAM under control, or run a guard that does it automatically. Use when several parallel sessions are running, RAM is high, WSL is near its memory cap, or the user asks to pause, hold, freeze or resume a background session.
+description: Pause and resume Claude child sessions on the default tmux server (from session-switcher, or a run-job that uses job-* sessions there) to keep RAM under control, or run a guard that does it automatically. Use when several parallel sessions are running, RAM is high, WSL is near its memory cap, or the user asks to pause, hold, freeze or resume a background session.
 ---
 
 # Session Airspace

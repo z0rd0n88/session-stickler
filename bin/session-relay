@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# session-relay: see and steer the Claude children that session-switcher (or run-job) started,
-# without a TTY or `tmux attach`. Works the same from a terminal and from Claude Desktop.
+# session-relay: see and steer Claude children on the default tmux server (session-switcher's, or
+# a job-* run-job's) without a TTY or `tmux attach`. Works the same from a terminal and Claude Desktop.
 #
 # Commands:
 #   session-relay list                          One line per child: target, state, memory, last reply

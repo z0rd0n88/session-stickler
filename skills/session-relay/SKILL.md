@@ -1,11 +1,11 @@
 ---
 name: session-relay
-description: See and steer Claude child sessions started by session-switcher or big-next-job's run-job, without tmux attach. Use to check on a handed-off session, send it a follow-up prompt and get the reply, read its screen, or close it — including from Claude Desktop, where tmux attach does not work.
+description: See and steer Claude child sessions on the default tmux server (started by session-switcher, or by a big-next-job run-job that uses job-* sessions there), without tmux attach. Use to check on a handed-off session, send it a follow-up prompt and get the reply, read its screen, or close it — including from Claude Desktop, where tmux attach does not work.
 ---
 
 # Session Relay
 
-Talks to the Claude children that `session-switcher` (tmux session `handoff`) and `run-job` (sessions `job-*`) start. It finds them in every tmux session, so one `list` shows them all. Everything works without a TTY.
+Talks to the Claude children on the default tmux server: those `session-switcher` starts (tmux session `handoff`) and those of a `run-job` that uses `job-*` sessions there. It finds them in every session on that server, so one `list` shows them all. Children on a private `tmux -L` server (a newer `run-job`'s, blast-off's) are not listed and cannot be targeted; the newer session-stickler from PR #10 finds them. Everything works without a TTY.
 
 ## Commands
 

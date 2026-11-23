@@ -3,8 +3,9 @@
 
 A *managed* child is a tmux pane running `claude --settings <dir>/settings.json ...`, where
 <dir> is the return-channel folder that session-switcher (and big-next-job's run-job) create:
-the child's Stop hook writes <dir>/done.json. Every tmux session is scanned, so children of
-`handoff`, `job-*` or any other session are all found.
+the child's Stop hook writes <dir>/done.json. Every session on the default tmux server is
+scanned, so children of `handoff`, `job-*` or any other session there are all found; a private
+`tmux -L` server (a newer run-job's, blast-off's) is not.
 
 Usage:
   session_panes.py list                 one TSV row per managed child (fields below)
@@ -138,16 +139,21 @@ def one_line(text, width=70):
 
 
 def cmd_list():
-    fmt = "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_pid}"
+    # A window name may hold tabs and newlines (tmux escapes every other control character, and
+    # session names in full), so it goes last and each row starts with a token no name can hold.
+    # -u keeps the tabs: under a non-UTF-8 locale tmux prints every tab as "_".
+    tok = os.urandom(8).hex()
+    fmt = tok + "\t#{session_name}\t#{window_index}\t#{pane_pid}\t#{window_name}"
     try:
-        out = subprocess.run(["tmux", "list-panes", "-a", "-F", fmt],
+        out = subprocess.run(["tmux", "-u", "list-panes", "-a", "-F", fmt],
                              capture_output=True, text=True, check=False).stdout
     except FileNotFoundError:
         return
     kids = proc_children()
     now = time.time()
-    for row in out.splitlines():
-        sess, idx, name, pane_pid = row.split("\t")
+    for row in out.split(tok + "\t")[1:]:
+        sess, idx, pane_pid, name = row.rstrip("\n").split("\t", 3)
+        name = name.replace("\t", " ").replace("\n", " ")   # one row per child, every field in place
         found = find_claude(int(pane_pid), kids)
         if not found:
             continue

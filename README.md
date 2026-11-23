@@ -49,7 +49,7 @@ sent to handoff:1 (sw-Xa91Qd): Now run the tests and summarise failures
 | [`bin/session-relay`](bin/session-relay) | See and steer child sessions without a TTY or `tmux attach` | `list` · `send <target> [--wait[=SECS]] "<prompt>"` · `last <target>` · `read <target> [lines=25]` · `kill <target>` |
 | [`bin/session-airspace`](bin/session-airspace) | Hold the largest children under memory pressure and release them when memory frees up | `status` · `hold <target>` · `release <target>` · `guard [--threshold 85] [--interval 5] [--once]` |
 
-A `<target>` is the window name `session-switcher` prints (`sw-Xa91Qd`), a `session:index` from `session-relay list`, or a bare window index in `$SWITCH_SESSION`. `session-relay` and `session-airspace` find children in **every** tmux session by their return channel (`claude --settings <dir>/settings.json`), so children of big-next-job's `run-job` (`job-*` sessions) show up next to handoffs. Nothing else on the machine can be targeted: a typo or a stray PID is refused.
+A `<target>` is the window name `session-switcher` prints (`sw-Xa91Qd`), a `session:index` from `session-relay list`, or a bare window index in `$SWITCH_SESSION`. `session-relay` and `session-airspace` find children in **every** session on the default tmux server by their return channel (`claude --settings <dir>/settings.json`), so children of big-next-job's `run-job` show up next to handoffs while it uses `job-*` sessions there. A `run-job` or blast-off that starts its children on a private `tmux -L` server is not scanned, so those children are not listed and cannot be targeted; the newer session-stickler in PR #10 finds them. Nothing else on the machine can be targeted: a typo or a stray PID is refused.
 
 ## How it works
 
@@ -117,7 +117,7 @@ flowchart LR
 - **Trust dialog: auto-answered only for the parent's own folder.** Claude asks for confirmation before working in an unseen folder. The script answers that dialog by screen-scraping the pane, the same trick Orca's daemon uses, **only when `workdir` equals the parent's `$PWD`**. A folder the parent is already working in is implicitly trusted. Any other folder times out with exit `2`, and a human answers by hand. A source comment marks the scrape for removal if `claude` gains a `--trust` flag.
 - **Hooks instead of polling the screen for results.** The reply is the structured `Stop` event (`session_id`, `transcript_path`, `last_assistant_message`). It is not scraped terminal text.
 - **No daemon, no extra services.** Three Bash scripts in `set -euo pipefail` plus a small shared helper (`lib/`). They need `python3` only for JSON and `/proc` parsing, and keep all state in tmux plus one temp directory per handoff (and one file listing the guard's own holds).
-- **Holds are tested on real sessions, not assumed.** A live `claude` child was held for 90 seconds in the middle of a streaming reply, and for 40 seconds during a foreground Bash-tool command (the command's own `sleep` was held too). Both turns completed normally after release, with no error or retry; the API connection survived the pause. `tests/smoke.sh` covers the rest of the behaviour with a fake `claude`: 39 checks, no account needed.
+- **Holds are tested on real sessions, not assumed.** A live `claude` child was held for 90 seconds in the middle of a streaming reply, and for 40 seconds during a foreground Bash-tool command (the command's own `sleep` was held too). Both turns completed normally after release, with no error or retry; the API connection survived the pause. `tests/smoke.sh` covers the rest of the behaviour with a fake `claude`: 40 checks, no account needed.
 - **Desktop-aware.** `session-relay` exists because a parent hosted by Claude Desktop has no TTY. The design notes record the evidence: `tty` reports `not a tty`, and `CLAUDE_CODE_DESKTOP_APP_VERSION` is set.
 - **Skills-first.** Each tool has a `SKILL.md` that tells Claude when and how to call it, so "hand this off" becomes something the agent does by itself.
 
@@ -181,7 +181,7 @@ session-airspace guard --threshold 90 --once         # a single check at 90%, th
 ## Testing
 
 ```bash
-tests/smoke.sh      # 39 checks; prints "39 passed, 0 failed"
+tests/smoke.sh      # 40 checks; prints "40 passed, 0 failed"
 ```
 
 It runs in a private tmux server with a fake `claude` (`tests/fake-bin/claude`), so it needs only `tmux` and `python3` and leaves your real sessions alone. It covers the handoff, every relay command (including multi-line prompts and key names sent as text), holds across a process tree, the guard's hold/release rules, and refusing a target that is not a managed child.
@@ -217,7 +217,7 @@ session-stickler/
 │   ├── session_panes.py      # finds Claude children in tmux, process trees, RAM, done.json
 │   └── session-common.sh     # target resolution and hold/release, shared by relay and airspace
 ├── tests/
-│   ├── smoke.sh              # 39 checks across all three tools (tmux + python3, no account)
+│   ├── smoke.sh              # 40 checks across all three tools (tmux + python3, no account)
 │   └── fake-bin/claude       # stand-in claude that answers "echo: <prompt>" and fires the Stop hook
 ├── skills/
 │   ├── session-switcher/SKILL.md
