@@ -73,6 +73,24 @@ tmux send-keys -t "smoke:1" 2 Enter   # answer it ("2. No"), as a person would
 for _ in $(seq 1 25); do session-relay last "$A" 2>/dev/null | grep -q '^echo: denied' && break; sleep 0.2; done   # its turn has ended
 reply=$(session-relay send "$A" --wait=15 'after the dialog' 2>&1)
 grep -q 'echo: after the dialog' <<<"$reply" && ok "send works again once the dialog is answered" || { bad "send after the dialog"; echo "$reply"; }
+# A slash command writes to the transcript but fires no Stop. Once it is a few seconds old, the
+# child must read as idle again, or send --wait waits forever (seen live with /model).
+session-relay send "$A" '/status' >/dev/null 2>&1
+sleep 6
+st=$(python3 "$ROOT/lib/session_panes.py" list | awk -F'\t' -v a="$A" '$2 == a {print $6}')
+[ "$st" = idle ] && ok "a slash command (transcript write, no Stop) leaves the child idle" || bad "a slash command leaves the child idle (state $st)"
+reply=$(session-relay send "$A" --wait=10 'after a slash command' 2>&1)
+grep -q 'echo: after a slash command' <<<"$reply" && ok "send --wait works after a slash command" || { bad "send --wait after a slash command"; echo "$reply"; }
+# A picker whose footer has other hints before "Esc to cancel" (seen live with /model, whose Enter
+# saves a new default model) is a dialog too.
+session-relay send "$A" '/picker' >/dev/null 2>&1
+for _ in $(seq 1 25); do session-relay read "$A" 5 | grep -q 'Enter to save' && break; sleep 0.2; done
+out=$(session-relay send "$A" 'into the picker' 2>&1); rc=$?
+[ "$rc" -eq 5 ] && grep -q "showing a dialog" <<<"$out" && ok "send refuses a picker whose footer ends in Esc to cancel (exit 5)" || { bad "send refuses a picker (rc $rc)"; echo "$out"; }
+sleep 1; [ ! -e "$ADIR/picked" ] && ok "nothing was picked in it" || bad "send picked an option in the picker"
+tmux send-keys -t "smoke:1" Enter   # close it, as a person would
+for _ in $(seq 1 25); do [ -e "$ADIR/picked" ] && break; sleep 0.2; done
+sleep 6
 # F10: a turn that starts within a second of the last one ending must read as working, not idle.
 # Typed straight into the pane (send pauses before Enter), so the turn starts inside that second.
 reply=$(session-relay send "$A" --wait=15 'just before' 2>&1)
