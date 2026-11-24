@@ -242,12 +242,15 @@ def cmd_list():
                 state = "held"
             elif ended is None:
                 state = "starting" if trans_t is None else "working"
-            elif trans_t is not None and trans_t > ended + 1:
-                state = "working"
             elif footer_busy(sock, pane_id):
-                # The 1 s slack above (the transcript gets a last write just after the Stop hook)
-                # hides a turn that starts within a second of the last one ending; the footer does
-                # not. A new turn after a failed one is working too: the footer shows only in a turn.
+                # Claude Code's "esc to interrupt" footer shows exactly while a turn runs, including
+                # one that starts within a second of the last one ending, or after a failed one.
+                state = "working"
+            elif trans_t is not None and trans_t > ended + 1 and now - trans_t < TURN_START_GRACE:
+                # A transcript written after the last Stop event is a turn starting before its
+                # footer is drawn. An older write without the footer is not a turn: a slash command
+                # (/model, /config) writes to the transcript and never fires Stop. (The 1 s slack:
+                # the transcript gets a last write just after the Stop hook.)
                 state = "working"
             else:
                 state = "failed" if is_failed else "idle"
@@ -261,6 +264,9 @@ def cmd_list():
                 target, name, pane_pid, cpid, wrapped, state, rss,
                 int(now - started), int(now - last_change), sdir, sock, pane_id, runner, job,
                 one_line(msg) or "-")))
+
+
+TURN_START_GRACE = 5   # seconds a fresh transcript write counts as "working" without the footer
 
 
 def footer_busy(socket, pane_id):
