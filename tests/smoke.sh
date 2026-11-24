@@ -278,6 +278,25 @@ out=$(SWITCH_TIMEOUT=2m session-switcher durable.md 2>&1); rc=$?
 [ "$rc" -eq 1 ] && grep -q 'whole number of seconds' <<<"$out" && ok "a non-numeric SWITCH_TIMEOUT is refused" || { bad "non-numeric SWITCH_TIMEOUT (rc $rc)"; echo "$out"; }
 session-switcher --help | grep -q 'SWITCH_TIMEOUT=180' && session-switcher --help | grep -q '240000 ms' && ok "--help gives the 180 s default and the Bash-tool timeout advice" || bad "--help timeout text"
 
+echo "background shells"
+printf 'BACKGROUND first turn\n' > bgbrief.md
+out=$(SWITCH_TIMEOUT=30 session-switcher bgbrief.md 2>&1); rc=$?
+G=$(sed -n 's/^launched  window=\(sw-[^ ]*\).*/\1/p' <<<"$out")
+[ "$rc" -eq 0 ] && grep -q 'background shell(s) running; waiting' <<<"$out" && grep -q '^echo: background finished' <<<"$out" \
+  && ok "switcher waits through a background shell for the turn it starts" || { bad "switcher waits through a background shell (rc $rc)"; echo "$out"; }
+session-relay send "$G" 'BACKGROUND second' >/dev/null
+for _ in $(seq 1 30); do session-relay list | grep -q "$G .*background" && break; sleep 0.2; done
+list=$(session-relay list)
+grep -q "$G .*background" <<<"$list" && ok "list shows a child whose turn ended with a shell still running as background" || { bad "list shows background"; echo "$list"; }
+for _ in $(seq 1 40); do session-relay list | grep -q "$G .*idle" && break; sleep 0.2; done
+reply=$(session-relay send "$G" --wait=30 'BACKGROUND third' 2>&1); rc=$?
+[ "$rc" -eq 0 ] && grep -q 'background shell(s) running; waiting for the turn' <<<"$reply" && grep -q '^echo: background finished' <<<"$reply" \
+  && ok "send --wait waits through a background shell and prints the later reply" || { bad "send --wait through a background shell (rc $rc)"; echo "$reply"; }
+t0=$SECONDS; reply=$(session-relay send "$G" --wait=5 'BACKGROUND-FOREVER fourth' 2>&1); rc=$?
+[ "$rc" -eq 0 ] && [ $((SECONDS - t0)) -le 12 ] && grep -q 'echo: started (BACKGROUND-FOREVER fourth)' <<<"$reply" && grep -q 'still has background shell(s) running' <<<"$reply" \
+  && ok "a shell that never ends is capped by the --wait deadline, with the reply so far" || { bad "a never-ending shell is capped (rc $rc, $((SECONDS - t0))s)"; echo "$reply"; }
+session-relay kill "$G" >/dev/null 2>&1; pkill -f 'snapshot-bash-fake' 2>/dev/null
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

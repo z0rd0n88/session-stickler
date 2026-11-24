@@ -100,8 +100,27 @@ echo "watch:    session-relay read $NAME   (in a terminal: tmux attach -t $SESSI
 # 7. wait for the child's first turn to end. A folder the child has not seen before shows the
 #    "trust this folder?" dialog; answer it only for the parent's own working directory.
 #    ponytail: screen scrape, same trick Orca's daemon uses; replace if claude grows a --trust flag.
+#    A first turn can end with a shell still running in the background; Claude Code starts a new
+#    turn when it finishes, and that one holds the real reply, so keep waiting for it (within
+#    SWITCH_TIMEOUT; a background shell that ends without a new turn within 30 s is not waited on).
+LIB="$(cd "$(dirname "$(readlink -f "$0")")/../lib" && pwd)"
+PANE_INFO=$(tmux display -p -t "$WIN" "#{pane_id} #{pane_pid}")   # "%N <pid>"
+bg_count() { python3 "$LIB/session_panes.py" bg "${PANE_INFO#* }" default "${PANE_INFO%% *}" 2>/dev/null || echo 0; }
+stamp() { stat -c "%y %s" "$DIR/done.json" 2>/dev/null || true; }
+SEEN="" BG=0 SETTLED=0
 for ((i=0; i<TIMEOUT; i++)); do
-  [ -s "$DIR/done.json" ] && break
+  if [ -s "$DIR/done.json" ]; then
+    if [ "$(stamp)" != "$SEEN" ]; then
+      SEEN=$(stamp)
+      [ "$(bg_count)" -eq 0 ] && break
+      [ "$BG" = 1 ] || echo "the child ended its turn with background shell(s) running; waiting for the turn they start"
+      BG=1 SETTLED=0
+    elif [ "$(bg_count)" -gt 0 ] || tmux capture-pane -p -t "$WIN" 2>/dev/null | tail -n 30 | grep -q 'esc to interrupt'; then
+      SETTLED=0
+    elif [ "$SETTLED" = 0 ]; then SETTLED=$i
+    elif [ $((i - SETTLED)) -ge 30 ]; then break
+    fi
+  fi
   if [ "$WORKDIR" = "$PWD" ] && tmux capture-pane -p -t "$WIN" 2>/dev/null | grep -q "Yes, I trust this folder"; then
     tmux send-keys -t "$WIN" Down Enter; echo "accepted trust dialog for $WORKDIR"; sleep 2
   fi
@@ -123,4 +142,5 @@ print("transcript:   ", ev.get("transcript_path"))
 print("--- child's last message ---")
 print(ev.get("last_assistant_message") or "(none in Stop event; read the transcript)")
 PY
+[ "$BG" = 1 ] && [ "$(bg_count)" -gt 0 ] && echo "note: after ${TIMEOUT}s the child still has background shell(s) running; it starts a new turn when they finish. Later: session-relay last $NAME"
 echo "--- follow up: session-relay send $NAME --wait \"<prompt>\"   close: session-relay kill $NAME"

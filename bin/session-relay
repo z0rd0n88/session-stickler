@@ -22,6 +22,8 @@
 # send exits 3 if the child is held, 4 for a blast-off child without --force, 5 if it shows a
 # dialog (Enter would answer it), 2 on a --wait timeout.
 # env: SWITCH_SESSION=handoff   RELAY_WAIT=600 (default --wait seconds)
+#      RELAY_BG_SETTLE=30 (--wait: a turn that ended with background shells running is followed by
+#      the turn Claude starts when they finish; stop waiting this long after they end without one)
 set -euo pipefail
 
 LIB="$(cd "$(dirname "$(readlink -f "$0")")/../lib" && pwd)"
@@ -147,20 +149,45 @@ cmd_send() {
   echo "sent to $T_TARGET ($T_NAME): $(printf '%s' "$text" | head -c 120 | tr '\n' ' ')"
 
   [ -n "$wait" ] || return 0
-  local now first=1
+  # A turn can end with a shell still running in the background ("waiting for the tests to
+  # finish"); Claude Code starts a new turn when it finishes. That later turn holds the real answer,
+  # so keep waiting for it. A shell that never ends (a dev server) is capped by the --wait deadline,
+  # and one that ends without a new turn following within BG_SETTLE seconds is not waited on.
+  local now first=1 bg=0 settled=0 n
   while [ "$first" = 1 ] || [ "$SECONDS" -lt "$deadline" ]; do   # --wait=0 still takes one look
     first=0
     now=$(stat -c "%y %s" "$done_file" "$failed_file" 2>/dev/null || true)
     if [ -n "$now" ] && [ "$now" != "$before" ] && { [ -s "$done_file" ] || [ -s "$failed_file" ]; }; then
       sleep 0.2   # session-switcher's hook writes done.json with `cat >`; give it a moment to finish
-      echo "--- reply from $T_TARGET ---"
-      python3 "$LIB/session_panes.py" last "$T_DIR" || echo "(no message in Stop event; see: session-relay read $T_TARGET)"
-      return 0
+      n=$(bg_count)
+      if [ "$n" -eq 0 ]; then print_reply; return 0; fi
+      [ "$bg" = 1 ] || echo "($T_TARGET ended its turn with $n background shell(s) running; waiting for the turn they start. So far: $(python3 "$LIB/session_panes.py" last "$T_DIR" 2>/dev/null | tr '\n' ' ' | cut -c1-100))"
+      bg=1 before=$now settled=0
+    elif [ "$bg" = 1 ]; then
+      if [ "$(bg_count)" -gt 0 ] || busy; then
+        settled=0
+      elif [ "$settled" = 0 ]; then
+        settled=$SECONDS
+      elif [ $((SECONDS - settled)) -ge "$BG_SETTLE" ]; then
+        print_reply; return 0
+      fi
     fi
     sleep 1
   done
+  if [ "$bg" = 1 ]; then
+    print_reply
+    echo "(after ${wait}s $T_TARGET still has background shell(s) running; it starts a new turn when they finish. Later: session-relay last $T_TARGET)"
+    return 0
+  fi
   echo "timeout after ${wait}s; $T_TARGET is still working on the prompt. Check later: session-relay last $T_TARGET" >&2
   exit 2
+}
+
+BG_SETTLE=${RELAY_BG_SETTLE:-30}
+bg_count() { python3 "$LIB/session_panes.py" bg "$T_CLAUDE" "$T_SOCKET" "$T_PANE_ID" 2>/dev/null || echo 0; }
+print_reply() {
+  echo "--- reply from $T_TARGET ---"
+  python3 "$LIB/session_panes.py" last "$T_DIR" || echo "(no message in Stop event; see: session-relay read $T_TARGET)"
 }
 
 cmd_last() {

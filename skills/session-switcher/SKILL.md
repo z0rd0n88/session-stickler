@@ -40,7 +40,7 @@ session-switcher handoff.md [workdir]
 ## Limits (tmux mode)
 
 - One brief in, first reply out. For a running conversation, use `session-relay`.
-- `Stop` fires every turn; `done.json` holds the latest one.
+- `Stop` fires every turn; `done.json` holds the latest one. If the first turn ends with a shell still running in the background, `session-switcher` says so and keeps waiting (within `SWITCH_TIMEOUT`) for the turn Claude starts when that shell finishes, and prints that reply. If the shell is still running when time is up, it prints the reply so far with a note.
 - The brief is a command-line argument, so any process of the same user can read it from `/proc`. Fine on a single-user box; for secrets, put a file path in the brief instead of the secret.
 - A folder the child has never opened shows Claude's trust dialog. `session-switcher` answers it only when the workdir is the parent's own directory; otherwise it times out and someone must answer it in a terminal (`tmux attach -t handoff`).
 - A warning before launch means RAM is already at `SWITCH_RAM_WARN` percent (default 85) or more; check `session-airspace status` before adding children.

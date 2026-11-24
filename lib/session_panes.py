@@ -12,6 +12,9 @@ Usage:
   session_panes.py list                 one TSV row per managed child (fields below)
   session_panes.py tree <pid>           <pid> and its descendants, parents first
   session_panes.py ram                  "used_mb total_mb avail_mb pct"
+  session_panes.py bg <pid> [socket pane_id]
+                                        how many background shells run under <pid> (a claude pid
+                                        or its pane's pid); with a pane, also reads its footer
   session_panes.py last <dir>           the child's last reply (done.json), or its failure
                                         (failed.json) when that is newer
 
@@ -19,7 +22,9 @@ list fields: target name pane_pid claude_pid wrapped state rss_mb age_s activity
              pane_id runner job last
   target    "session:window_index" on the default server, "socket/session:window_index" elsewhere
   wrapped   1 if claude is a child of the pane's shell (holdable), 0 if it is the pane process
-  state     held | working | idle | failed | starting
+  state     held | working | background | idle | failed | starting
+            background: the turn ended, but a shell it started in the background still runs;
+            Claude Code starts a new turn by itself when that shell finishes
   rss_mb    resident memory of claude and every process under it
   activity  seconds since the transcript, done.json or failed.json last changed
   socket    tmux socket name, for `tmux -L <socket>`
@@ -29,6 +34,7 @@ list fields: target name pane_pid claude_pid wrapped state rss_mb age_s activity
 """
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -252,6 +258,8 @@ def cmd_list():
                 # (/model, /config) writes to the transcript and never fires Stop. (The 1 s slack:
                 # the transcript gets a last write just after the Stop hook.)
                 state = "working"
+            elif bg_shells(cpid, kids, sock, pane_id):
+                state = "background"
             else:
                 state = "failed" if is_failed else "idle"
             rss = sum(rss_kb(p) for p in tree(cpid, kids)) // 1024
@@ -269,15 +277,43 @@ def cmd_list():
 TURN_START_GRACE = 5   # seconds a fresh transcript write counts as "working" without the footer
 
 
-def footer_busy(socket, pane_id):
-    """True while Claude Code's footer reads "esc to interrupt", which it shows exactly while a turn
-    runs. Asks the child's own server (-L socket) for its exact pane."""
+# The Bash tool runs each command as `bash -c 'source <home>/.claude/shell-snapshots/snapshot-...'`
+# under claude. Once a turn has ended, any such shell still alive was started in the background
+# (run_in_background, or a long command Claude Code moved there), and Claude Code starts a new turn
+# when it finishes. A shell's own subshells carry the same argv, so only the outermost counts.
+SNAPSHOT = "/shell-snapshots/snapshot-"
+# The footer says the same: "· 1 shell ·", "· 2 shells · ↓ to manage", "· 1 shell still running".
+SHELLS_RE = re.compile(r"(?:^|·)\s*\d+ shells?(?: still running)?\s*(?:·|$)", re.M)
+
+
+def bg_shells(pid, kids=None, socket=None, pane_id=None):
+    """Count the background shells under <pid>; with a pane, a footer that shows one counts too."""
+    kids = kids if kids is not None else proc_children()
+    found, todo = 0, [(c, False) for c in kids.get(pid, [])]
+    while todo:
+        p, parent_is_shell = todo.pop()
+        is_shell = SNAPSHOT in " ".join(argv(p))
+        found += is_shell and not parent_is_shell
+        todo.extend((c, is_shell) for c in kids.get(p, []))
+    if not found and pane_id and SHELLS_RE.search(screen_tail(socket, pane_id)):
+        found = 1
+    return found
+
+
+def screen_tail(socket, pane_id, lines=30):
+    """The last <lines> lines of a pane's screen, from its own server (-L socket)."""
     try:
         screen = subprocess.run(["tmux", "-L", socket, "capture-pane", "-p", "-t", pane_id],
                                 capture_output=True, text=True, timeout=5, check=False).stdout
     except (OSError, subprocess.SubprocessError):
-        return False
-    return "esc to interrupt" in "\n".join(screen.splitlines()[-30:])
+        return ""
+    return "\n".join(screen.splitlines()[-lines:])
+
+
+def footer_busy(socket, pane_id):
+    """True while Claude Code's footer reads "esc to interrupt", which it shows exactly while a turn
+    runs."""
+    return "esc to interrupt" in screen_tail(socket, pane_id)
 
 
 def cmd_ram():
@@ -299,6 +335,8 @@ def main(argv):
         cmd_list()
     elif cmd == "tree" and len(argv) == 3:
         print(" ".join(str(p) for p in tree(int(argv[2]))))
+    elif cmd == "bg" and len(argv) in (3, 5):
+        print(bg_shells(int(argv[2]), None, *argv[3:5]))
     elif cmd == "ram":
         cmd_ram()
     elif cmd == "last" and len(argv) == 3:

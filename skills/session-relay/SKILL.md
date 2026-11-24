@@ -41,9 +41,9 @@ Every command works as usual. `kill` warns: run-job treats a killed child as a c
 
 ## States
 
-- `starting`: launched, no turn yet. `working`: a turn is in progress. `idle`: last turn finished. `failed`: an API error ended the last turn (blast-off's `StopFailure` hook wrote `failed.json`; `last` prints the error). `held`: paused by `session-airspace`.
+- `starting`: launched, no turn yet. `working`: a turn is in progress. `idle`: last turn finished. `background`: the last turn ended, but a shell it started in the background still runs; Claude Code starts a new turn by itself when that shell finishes. `failed`: an API error ended the last turn (blast-off's `StopFailure` hook wrote `failed.json`; `last` prints the error). `held`: paused by `session-airspace`.
 
 ## Limits
 
-- `--wait` returns at the end of the child's next turn. A child can end a turn while a command it started keeps running in the background; its later reply shows up in `last`.
+- `--wait` returns at the end of the child's next turn. If that turn ends with a shell still running in the background ("waiting for the tests to finish"), it prints a note with the reply so far and keeps waiting for the turn Claude starts when the shell finishes, then prints that reply. A shell that never finishes (a dev server) is capped by the `--wait` deadline: it then prints the reply so far and says the shell is still running (exit 0). If the shell finishes and no new turn starts within `RELAY_BG_SETTLE` seconds (30), it returns the reply it has.
 - `send` writes into the child's input as if typed, so slash commands (`/compact`) work too. Only send what you would type yourself.
