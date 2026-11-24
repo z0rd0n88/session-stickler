@@ -19,18 +19,21 @@
 # "socket/session:index" on another (blast-off: blast-off-<job>/job-<job>:3). The window name
 # session-switcher prints (sw-ab12cd) and a bare window index in $SWITCH_SESSION (default
 # handoff) also work.
+# --wait follows a turn that ends with a background shell running through to the turn Claude
+# starts when that shell finishes, and prints that reply (shells from earlier prompts don't count).
 # send exits 3 if the child is held, 4 for a blast-off child without --force, 5 if it shows a
-# dialog (Enter would answer it), 2 on a --wait timeout.
+# dialog (Enter would answer it; after a sent prompt, the reply so far is printed first), 2 on a
+# --wait timeout (after a sent prompt, with the reply so far), 1 if claude exits while waiting.
 # env: SWITCH_SESSION=handoff   RELAY_WAIT=600 (default --wait seconds)
-#      RELAY_BG_SETTLE=30 (--wait: a turn that ended with background shells running is followed by
-#      the turn Claude starts when they finish; stop waiting this long after they end without one)
+#      RELAY_BG_SETTLE=10 (--wait: once a background shell was seen, the quiet seconds after the
+#      last Stop before it counts as the reply; Claude starts its follow-up turn about 1 s after)
 set -euo pipefail
 
 LIB="$(cd "$(dirname "$(readlink -f "$0")")/../lib" && pwd)"
 # shellcheck source=lib/session-common.sh
 . "$LIB/session-common.sh"
 
-usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # dialog_line: print the footer line of a choice dialog on the child's screen (a permission prompt,
 # the trust dialog, a question menu, a /model or /config panel) and succeed; fail when there is
@@ -44,15 +47,12 @@ dialog_line() {
     | grep -m1 -E '(^|·)[[:space:]]*Esc to (cancel|close|go back)[[:space:]]*(·|$)'
 }
 
-# busy: the child is in a turn. Two signals, because each alone has a blind spot: the state from
-# done.json and the transcript (which reads `idle` for about a second after a turn ends, even if a
-# new prompt has just started the next one), and Claude Code's "esc to interrupt" footer, which is
-# on screen exactly while a turn runs (a UI change could remove it). Refreshes T_STATE.
+# busy: the child is in a turn: its state is `working` (Claude Code's "esc to interrupt" footer, or
+# a transcript write in the last few seconds) or `starting`. Refreshes T_STATE.
 busy() {
   resolve_target "$target" || exit 1
   [ "$T_STATE" != held ] || { echo "error: $T_TARGET was held by session-airspace while waiting" >&2; exit 3; }
-  [ "$T_STATE" = working ] || [ "$T_STATE" = starting ] \
-    || [ "$(tm capture-pane -p -t "$T_PANE_ID" 2>/dev/null | tail -n 30 | grep -c 'esc to interrupt')" -gt 0 ]
+  [ "$T_STATE" = working ] || [ "$T_STATE" = starting ]
 }
 
 cmd_list() {
@@ -131,6 +131,8 @@ cmd_send() {
   # A turn ends in done.json, or (blast-off's StopFailure hook) in failed.json.
   local done_file="$T_DIR/done.json" failed_file="$T_DIR/failed.json" before=""
   before=$(stat -c "%y %s" "$done_file" "$failed_file" 2>/dev/null || true)
+  local bg_base=""   # background shells already running (a dev server): not this prompt's
+  [ -z "$wait" ] || read -r _ _ bg_base < <(bg_status)
 
   # Paste, don't type: send-keys would read words like "Enter" or "C-c" as key names, and a
   # newline would submit half a prompt. paste-buffer -p wraps the text in bracketed-paste
@@ -150,41 +152,59 @@ cmd_send() {
 
   [ -n "$wait" ] || return 0
   # A turn can end with a shell still running in the background ("waiting for the tests to
-  # finish"); Claude Code starts a new turn when it finishes. That later turn holds the real answer,
-  # so keep waiting for it. A shell that never ends (a dev server) is capped by the --wait deadline,
-  # and one that ends without a new turn following within BG_SETTLE seconds is not waited on.
-  local now first=1 bg=0 settled=0 n
+  # finish"), and Claude Code starts a new turn when that shell finishes: that turn holds the real
+  # answer. So a Stop is the reply only once no shell started since this prompt still runs, no turn
+  # runs, and, if such a shell was seen at all (the footer lists one mid-turn too), BG_SETTLE quiet
+  # seconds have passed: a shell that ends while Claude writes its last message is followed by a
+  # new turn about a second after the Stop. Shells from earlier prompts (a dev server) are the
+  # baseline and do not count. The --wait deadline caps a shell that never ends.
+  local now first=1 stopped=0 seen=0 quiet=0 noted=0 new isbusy _tok dlg
   while [ "$first" = 1 ] || [ "$SECONDS" -lt "$deadline" ]; do   # --wait=0 still takes one look
     first=0
+    [ -d "/proc/$T_CLAUDE" ] || { echo "error: $T_TARGET's claude exited while waiting; see: session-relay read $T_TARGET" >&2; exit 1; }
+    [ "$(proc_state "$T_CLAUDE")" != T ] || { echo "error: $T_TARGET was held by session-airspace while waiting; the prompt was sent. Later: session-relay last $T_TARGET" >&2; exit 3; }
+    read -r new isbusy _tok < <(bg_status "$bg_base")
+    [ "${new:-0}" -gt 0 ] && seen=1
     now=$(stat -c "%y %s" "$done_file" "$failed_file" 2>/dev/null || true)
     if [ -n "$now" ] && [ "$now" != "$before" ] && { [ -s "$done_file" ] || [ -s "$failed_file" ]; }; then
       sleep 0.2   # session-switcher's hook writes done.json with `cat >`; give it a moment to finish
-      n=$(bg_count)
-      if [ "$n" -eq 0 ]; then print_reply; return 0; fi
-      [ "$bg" = 1 ] || echo "($T_TARGET ended its turn with $n background shell(s) running; waiting for the turn they start. So far: $(python3 "$LIB/session_panes.py" last "$T_DIR" 2>/dev/null | tr '\n' ' ' | cut -c1-100))"
-      bg=1 before=$now settled=0
-    elif [ "$bg" = 1 ]; then
-      if [ "$(bg_count)" -gt 0 ] || busy; then
-        settled=0
-      elif [ "$settled" = 0 ]; then
-        settled=$SECONDS
-      elif [ $((SECONDS - settled)) -ge "$BG_SETTLE" ]; then
+      stopped=1 before=$now quiet=0
+      if [ "${new:-0}" -gt 0 ] && [ "$noted" = 0 ]; then
+        noted=1
+        echo "($T_TARGET ended its turn with $new background shell(s) running; waiting for the turn they start. So far: $(python3 "$LIB/session_panes.py" last "$T_DIR" 2>/dev/null | tr '\n' ' ' | cut -c1-100))"
+      fi
+    fi
+    if [ "$stopped" = 1 ]; then
+      if dlg=$(dialog_line); then
+        print_reply
+        echo "($T_TARGET is now showing a dialog (${dlg#"${dlg%%[![:space:]]*}"}); its next turn waits on it. Answer it in a terminal; later: session-relay last $T_TARGET)"
+        exit 5
+      fi
+      if [ "${new:-0}" -gt 0 ] || [ "${isbusy:-0}" = 1 ]; then
+        quiet=0
+      elif [ "$seen" = 0 ]; then
+        print_reply; return 0
+      elif [ "$quiet" = 0 ]; then
+        quiet=$SECONDS
+      elif [ $((SECONDS - quiet)) -ge "$BG_SETTLE" ]; then
         print_reply; return 0
       fi
     fi
     sleep 1
   done
-  if [ "$bg" = 1 ]; then
+  if [ "$stopped" = 1 ]; then
     print_reply
-    echo "(after ${wait}s $T_TARGET still has background shell(s) running; it starts a new turn when they finish. Later: session-relay last $T_TARGET)"
-    return 0
+    echo "(after ${wait}s $T_TARGET is still working: a background shell it started, or the turn that follows one. Later: session-relay last $T_TARGET)"
+    exit 2
   fi
   echo "timeout after ${wait}s; $T_TARGET is still working on the prompt. Check later: session-relay last $T_TARGET" >&2
   exit 2
 }
 
-BG_SETTLE=${RELAY_BG_SETTLE:-30}
-bg_count() { python3 "$LIB/session_panes.py" bg "$T_CLAUDE" "$T_SOCKET" "$T_PANE_ID" 2>/dev/null || echo 0; }
+BG_SETTLE=${RELAY_BG_SETTLE:-10}
+[[ "$BG_SETTLE" =~ ^[0-9]+$ ]] || { echo "RELAY_BG_SETTLE must be a whole number of seconds, got: $BG_SETTLE" >&2; exit 1; }
+# bg_status [baseline]: "<new> <busy> <token>" for the resolved child (see session_panes.py bg)
+bg_status() { python3 "$LIB/session_panes.py" bg "$T_CLAUDE" "$T_SOCKET" "$T_PANE_ID" "${1:-}" 2>/dev/null || echo "0 0 /0"; }
 print_reply() {
   echo "--- reply from $T_TARGET ---"
   python3 "$LIB/session_panes.py" last "$T_DIR" || echo "(no message in Stop event; see: session-relay read $T_TARGET)"
