@@ -10,10 +10,10 @@
 #         SWITCH_RAM_WARN=85 (warn before launching when RAM use is at or above this percent)
 #         SWITCH_MODE=desktop|tmux (default: desktop when the parent runs in Claude Desktop; desktop opens the child there, no reply back)
 #         SWITCH_ALLOW_TEMP=1 (launch even when the brief points into a session's scratchpad or task dirs)
-#         SWITCH_BG_SETTLE=10 (a first turn that ends with a background shell running is followed
-#           to the turn Claude starts when it finishes; once one was seen, the quiet seconds after
-#           the last Stop before it counts as the reply. Still working at SWITCH_TIMEOUT: exit 2
-#           with the reply so far. Background subagents and monitors get a note, not a wait)
+#         SWITCH_BG_SETTLE=10 (a first turn that ends with background work running, a shell, a
+#           monitor or a subagent, is followed to the turn Claude starts when it finishes; once some
+#           was seen, the quiet seconds after the last Stop before it counts as the reply. Still
+#           working at SWITCH_TIMEOUT: exit 2 with the reply so far)
 # Follow up:  session-relay send <window> --wait "..."    Watch:  session-relay read <window>
 set -euo pipefail
 case "${1:-}" in -h|--help|"") sed -n 2,17p "$0"; exit 0;; esac
@@ -106,24 +106,25 @@ echo "watch:    session-relay read $NAME   (in a terminal: tmux attach -t $SESSI
 # 7. wait for the child's first turn to end. A folder the child has not seen before shows the
 #    "trust this folder?" dialog; answer it only for the parent's own working directory.
 #    ponytail: screen scrape, same trick Orca's daemon uses; replace if claude grows a --trust flag.
-#    A first turn can end with a shell still running in the background, and Claude Code starts a
-#    new turn when it finishes: that one holds the real reply. So a Stop is the reply only once no
-#    background shell runs, no turn runs, and, if one was seen at all (the footer lists it mid-turn
-#    too), SWITCH_BG_SETTLE quiet seconds have passed. The same rules as `session-relay send --wait`.
+#    A first turn can end with work still running in the background (a shell, a monitor or a
+#    subagent), and Claude Code starts a new turn when it finishes: that one holds the real reply.
+#    So a Stop is the reply only once no background work runs, no turn runs, and, if some was seen
+#    at all (the footer shows it mid-turn too), SWITCH_BG_SETTLE quiet seconds have passed. The same
+#    rules as `session-relay send --wait`.
 LIB="$(cd "$(dirname "$(readlink -f "$0")")/../lib" && pwd)"
 # The pane's own server: inside tmux (a run-job child calling this), that is $TMUX's, not "default".
 PANE_INFO=$(tmux display -p -t "$WIN" "#{socket_path} #{pane_id} #{pane_pid}" 2>/dev/null || echo "default - 0")
 read -r PANE_SOCK PANE_ID PANE_PID <<<"$PANE_INFO"
-bg_status() { python3 "$LIB/session_panes.py" bg "$PANE_PID" "$PANE_SOCK" "$PANE_ID" 2>/dev/null || echo "0 0 /0 0"; }
+bg_status() { python3 "$LIB/session_panes.py" bg "$PANE_PID" "$PANE_SOCK" "$PANE_ID" 2>/dev/null || echo "0 0 /0/0"; }
 stamp() { stat -c "%y %s" "$DIR/done.json" 2>/dev/null || true; }
 SEEN_STOP="" STOPPED=0 BG_SEEN=0 QUIET=0 NOTED=0 REPLIED=0
 for ((i=0; i<TIMEOUT; i++)); do
-  read -r NEW BUSY _ AGENTS < <(bg_status)
+  read -r NEW BUSY _ < <(bg_status)
   [ "${NEW:-0}" -gt 0 ] && BG_SEEN=1
   if [ -s "$DIR/done.json" ] && [ "$(stamp)" != "$SEEN_STOP" ]; then
     SEEN_STOP=$(stamp) STOPPED=1 QUIET=0
     if [ "${NEW:-0}" -gt 0 ] && [ "$NOTED" = 0 ]; then
-      NOTED=1; echo "the child ended its turn with background shell(s) running; waiting for the turn they start"
+      NOTED=1; echo "the child ended its turn with background work running (shells, monitors or subagents); waiting for the turn it starts"
     fi
   fi
   if [ "$STOPPED" = 1 ]; then
@@ -154,12 +155,8 @@ print("transcript:   ", ev.get("transcript_path"))
 print("--- child's last message ---")
 print(ev.get("last_assistant_message") or "(none in Stop event; read the transcript)")
 PY
-# Background subagents and monitors are reported, not waited on: they can run for good.
-if [ "${AGENTS:-0}" -gt 0 ]; then
-  echo "note: the child still lists ${AGENTS} background agent(s) or monitor(s); not waited on. Claude may start more turns when they finish. Later: session-relay last $NAME"
-fi
 if [ "$REPLIED" = 0 ]; then
-  echo "note: after ${TIMEOUT}s the child is still working: a background shell it started, or the turn that follows one. The reply above is the one so far; later: session-relay last $NAME"
+  echo "note: after ${TIMEOUT}s the child is still working: background work it started (a shell, monitor or subagent), or the turn that follows it. The reply above is the one so far; later: session-relay last $NAME"
   exit 2
 fi
 echo "--- follow up: session-relay send $NAME --wait \"<prompt>\"   close: session-relay kill $NAME"
