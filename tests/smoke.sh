@@ -310,6 +310,13 @@ t0=$SECONDS; reply=$(RELAY_BG_SETTLE=2 session-relay send "$G" --wait=40 'BACKGR
   && ok "a shell that ends with no turn after it is waited on only RELAY_BG_SETTLE seconds" || { bad "no follow-up turn (rc $rc, $((SECONDS - t0))s)"; echo "$reply"; }
 t0=$SECONDS; reply=$(session-relay send "$G" --wait=20 'the footer reads "· 1 shell ·" and "esc to interrupt" here' 2>&1); rc=$?
 [ "$rc" -eq 0 ] && [ $((SECONDS - t0)) -le 5 ] && ok "the words '· 1 shell ·' in the transcript are not taken for a running shell" || { bad "shell text in the transcript (rc $rc, $((SECONDS - t0))s)"; echo "$reply"; }
+t0=$SECONDS; reply=$(session-relay send "$G" --wait=30 'BACKGROUND-AGENT probe' 2>&1); rc=$?
+[ "$rc" -eq 0 ] && [ $((SECONDS - t0)) -le 4 ] && grep -q '^echo: started (BACKGROUND-AGENT probe)' <<<"$reply" && grep -q 'background agent(s) or monitor(s); not waited on' <<<"$reply" \
+  && ok "a background subagent or monitor is reported after the reply, not waited on" || { bad "background agent note (rc $rc, $((SECONDS - t0))s)"; echo "$reply"; }
+[ "$(state "$G")" = background ] && ok "list shows a child with a background agent listed as background" || bad "list STATE with a background agent (state $(state "$G"))"
+wait_state "$G" idle 10 || bad "$G idle once the agent row is gone (state $(state "$G"))"
+reply=$(session-relay send "$G" --wait=20 'the screen says ◯ general-purpose and · 1 monitor · here' 2>&1)
+! grep -q 'not waited on' <<<"$reply" && ok "agent and monitor words in the transcript are not taken for a running agent" || { bad "agent words in the transcript"; echo "$reply"; }
 session-relay send "$G" 'BACKGROUND-FOREVER dev server' >/dev/null
 for _ in $(seq 1 25); do session-relay last "$G" | grep -q 'started (BACKGROUND-FOREVER dev server)' && break; sleep 0.2; done
 t0=$SECONDS; reply=$(session-relay send "$G" --wait=20 'plain question' 2>&1); rc=$?
@@ -327,6 +334,11 @@ printf 'BACKGROUND-FOREVER first turn\n' > bgforever.md
 out=$(SWITCH_TIMEOUT=6 session-switcher bgforever.md 2>&1); rc=$?
 [ "$rc" -eq 2 ] && grep -q '^echo: started (BACKGROUND-FOREVER first turn)' <<<"$out" && grep -q 'still working' <<<"$out" \
   && ok "switcher: still working at SWITCH_TIMEOUT is exit 2, with the reply so far" || { bad "switcher timeout with a shell running (rc $rc)"; echo "$out"; }
+session-relay kill "$(sed -n 's/^launched  window=\(sw-[^ ]*\).*/\1/p' <<<"$out")" >/dev/null 2>&1
+printf 'BACKGROUND-AGENT first turn\n' > bgagent.md
+out=$(SWITCH_TIMEOUT=30 session-switcher bgagent.md 2>&1); rc=$?
+[ "$rc" -eq 0 ] && grep -q '^echo: started (BACKGROUND-AGENT first turn)' <<<"$out" && grep -q 'background agent(s) or monitor(s); not waited on' <<<"$out" \
+  && ok "switcher: a background agent gets a note, not a wait" || { bad "switcher background agent (rc $rc)"; echo "$out"; }
 session-relay kill "$(sed -n 's/^launched  window=\(sw-[^ ]*\).*/\1/p' <<<"$out")" >/dev/null 2>&1
 # Inside another tmux server (a run-job child calling the switcher), the child's window is on that
 # server; the status-line check must read it there, not the default server.

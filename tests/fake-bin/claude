@@ -28,6 +28,9 @@ Background shells (env FAKE_TAG names the marker so parallel suites don't collid
   BACKGROUND-FOREVER     a 60 s shell (longer than any test waits), no turn follows
   BACKGROUND-TREEONLY    like BACKGROUND, but the status line never lists it
   BACKGROUND-FOOTERONLY  like BACKGROUND, but only the status line lists it (no process)
+  BACKGROUND-AGENT       a background subagent waiting on a monitor, as seen live: a "◯ general-purpose"
+                         row under the status line and " · 1 monitor" in it, for 4 s; no shell, and
+                         no turn follows
 It also starts one `sleep` child, so holds can be checked across a process tree."""
 import json
 import os
@@ -55,6 +58,7 @@ TAG = os.environ.get("FAKE_TAG", "fake")
 RULE = "─" * 78
 history = ["fake claude ready"]
 shells = []                     # background shells: {"proc": Popen or None, "listed": bool}
+agents = []                     # background subagents, each waiting on one monitor
 turn_lock = threading.Lock()    # one turn at a time
 draw_lock = threading.RLock()   # one redraw at a time
 busy = False
@@ -64,8 +68,9 @@ def draw():
     with draw_lock:
         listed = sum(1 for sh in shells if sh["listed"])
         status = "  ⏵⏵ auto mode on" + (f" · {listed} shell{'s' if listed > 1 else ''}" if listed else "") \
-            + (" · esc to interrupt" if busy else "")
-        print("\x1b[2J\x1b[H" + "\n".join(history[-15:] + ["", RULE, "❯ ", RULE, status]), flush=True)
+            + (f" · {len(agents)} monitor" if agents else "") + (" · esc to interrupt" if busy else "")
+        rows = ["  ● main"] + [f"  ◯ general-purpose  waiting on 1 monitor · {a}" for a in agents] if agents else []
+        print("\x1b[2J\x1b[H" + "\n".join(history[-15:] + ["", RULE, "❯ ", RULE, status] + rows), flush=True)
 
 
 def say(line):
@@ -75,8 +80,19 @@ def say(line):
 
 
 def background(text):
-    kind = next((k for k in ("LATE", "NOFOLLOW", "FOREVER", "TREEONLY", "FOOTERONLY")
+    kind = next((k for k in ("LATE", "NOFOLLOW", "FOREVER", "TREEONLY", "FOOTERONLY", "AGENT")
                  if f"BACKGROUND-{k}" in text), "")
+    if kind == "AGENT":
+        agents.append("Probe agent")
+
+        def agent_done():
+            time.sleep(4)
+            with draw_lock:
+                agents.remove("Probe agent")
+                draw()
+
+        threading.Thread(target=agent_done, daemon=True).start()
+        return f"started ({text})"
     secs = {"LATE": 1, "NOFOLLOW": 2, "FOREVER": 60}.get(kind, 4)
     # `; true` keeps bash from exec'ing sleep (and losing its argv), as the Bash tool's own trailing
     # commands do.

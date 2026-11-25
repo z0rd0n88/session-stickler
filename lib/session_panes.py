@@ -13,10 +13,11 @@ Usage:
   session_panes.py tree <pid>           <pid> and its descendants, parents first
   session_panes.py ram                  "used_mb total_mb avail_mb pct"
   session_panes.py bg <pid> [socket pane_id [baseline]]
-                                        "<new> <busy> <token>": background shells started under
-                                        <pid> (a claude pid or its pane's pid) since <baseline>
-                                        (the token of an earlier call), whether a turn runs, and
-                                        a token for later calls. socket: a name, or a path
+                                        "<new> <busy> <token> <agents>": background shells started
+                                        under <pid> (a claude pid or its pane's pid) since
+                                        <baseline> (the token of an earlier call), whether a turn
+                                        runs, a token for later calls, and the background subagents
+                                        and monitors listed. socket: a name, or a path
   session_panes.py last <dir>           the child's last reply (done.json), or its failure
                                         (failed.json) when that is newer
 
@@ -25,8 +26,9 @@ list fields: target name pane_pid claude_pid wrapped state rss_mb age_s activity
   target    "session:window_index" on the default server, "socket/session:window_index" elsewhere
   wrapped   1 if claude is a child of the pane's shell (holdable), 0 if it is the pane process
   state     held | working | background | idle | failed | starting
-            background: the turn ended, but a shell it started in the background still runs;
-            Claude Code starts a new turn by itself when that shell finishes
+            background: the turn ended, but a shell it started in the background still runs
+            (Claude Code starts a new turn by itself when that shell finishes), or a background
+            subagent or monitor it started is still listed
   rss_mb    resident memory of claude and every process under it
   activity  seconds since the transcript, done.json or failed.json last changed
   socket    tmux socket name, for `tmux -L <socket>`
@@ -260,7 +262,7 @@ def cmd_list():
                 # (/model, /config) writes to the transcript and never fires Stop. (The 1 s slack:
                 # the transcript gets a last write just after the Stop hook.)
                 state = "working"
-            elif bg_status(cpid, sock, pane_id, kids=kids)[0]:
+            elif any(bg_status(cpid, sock, pane_id, kids=kids)[::3]):   # shells, or agents/monitors
                 state = "background"
             else:
                 state = "failed" if is_failed else "idle"
@@ -291,6 +293,12 @@ TURN_START_GRACE = 5   # seconds a fresh transcript write counts as "working" wi
 SNAPSHOT = "/shell-snapshots/snapshot-"
 RULE_RE = re.compile(r"^\s*─{8,}\s*$")
 FOOTER_SHELLS_RE = re.compile(r"(?:^|·)\s*(\d+) shells?\b", re.M)
+# Background subagents and monitors show there too, and are not waited on (they can run for good, and
+# start turns of their own): each subagent is a row under the status line ("◯ general-purpose  waiting
+# on 1 monitor · ..."; "● main" is the session itself), and the status line counts monitors
+# ("· 1 monitor ·"). Checked live.
+FOOTER_AGENT_RE = re.compile(r"^\s*◯\s+\S", re.M)
+FOOTER_MONITORS_RE = re.compile(r"(?:^|·)\s*(\d+) monitors?\b", re.M)
 
 
 def tmux_socket_args(socket):
@@ -309,14 +317,17 @@ def screen_tail(socket, pane_id, lines=40):
 
 
 def footer(socket, pane_id):
-    """(busy, shells) from Claude Code's footer: the lines under the input box's lower rule (or
-    the last two non-blank lines when there is no rule). busy: "esc to interrupt", shown exactly
-    while a turn runs. shells: the background shells it lists."""
+    """(busy, shells, agents) from Claude Code's footer: the lines under the input box's lower rule
+    (or the last two non-blank lines when there is no rule). busy: "esc to interrupt", shown exactly
+    while a turn runs. shells: the background shells it lists. agents: background subagents and
+    monitors it lists."""
     lines = screen_tail(socket, pane_id).splitlines()
     rules = [i for i, line in enumerate(lines) if RULE_RE.match(line)]
     text = "\n".join(lines[rules[-1] + 1:] if rules else [l for l in lines if l.strip()][-2:])
     m = FOOTER_SHELLS_RE.search(text)
-    return "esc to interrupt" in text, int(m.group(1)) if m else 0
+    mon = FOOTER_MONITORS_RE.search(text)
+    agents = len(FOOTER_AGENT_RE.findall(text)) + (int(mon.group(1)) if mon else 0)
+    return "esc to interrupt" in text, int(m.group(1)) if m else 0, agents
 
 
 def footer_busy(socket, pane_id):
@@ -336,16 +347,17 @@ def tree_shells(pid, kids):
 
 
 def bg_status(pid, socket=None, pane_id=None, baseline="", kids=None):
-    """(new, busy, token) for the child whose claude (or pane) pid is <pid>. new: background shells
-    started since <baseline>, a token from an earlier call ("" = none), so a dev server left by an
-    earlier prompt does not count. token: "<pids>/<footer count>" to pass as a later baseline."""
+    """(new, busy, token, agents) for the child whose claude (or pane) pid is <pid>. new: background
+    shells started since <baseline>, a token from an earlier call ("" = none), so a dev server left
+    by an earlier prompt does not count. token: "<pids>/<footer count>" to pass as a later baseline.
+    agents: background subagents and monitors the footer lists (reported, never waited on)."""
     kids = kids if kids is not None else proc_children()
-    busy, listed = footer(socket, pane_id) if pane_id else (False, 0)
+    busy, listed, agents = footer(socket, pane_id) if pane_id else (False, 0, 0)
     pids = tree_shells(pid, kids) if pid > 1 else set()   # no pid: never scan from init
     base_pids, _, base_listed = baseline.partition("/")
     base = {int(p) for p in base_pids.split(",") if p.isdigit()}
     new = max(0 if busy else len(pids - base), listed - int(base_listed or 0))
-    return new, busy, ",".join(map(str, sorted(pids))) + f"/{listed}"
+    return new, busy, ",".join(map(str, sorted(pids))) + f"/{listed}", agents
 
 
 def cmd_ram():
@@ -368,8 +380,8 @@ def main(argv):
     elif cmd == "tree" and len(argv) == 3:
         print(" ".join(str(p) for p in tree(int(argv[2]))))
     elif cmd == "bg" and len(argv) in (3, 5, 6):
-        new, busy, token = bg_status(int(argv[2]), *argv[3:6])
-        print(new, int(busy), token)
+        new, busy, token, agents = bg_status(int(argv[2]), *argv[3:6])
+        print(new, int(busy), token, agents)
     elif cmd == "ram":
         cmd_ram()
     elif cmd == "last" and len(argv) == 3:
