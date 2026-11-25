@@ -249,4 +249,4 @@ session-stickler/
 
 Written by [@z0rd0n88](https://github.com/z0rd0n88). The handoff mechanism is adapted from Orca's `worktree create --agent claude --prompt`.
 
-There is no license file yet, so default copyright applies. Open an issue if you want to reuse the code.
+Released under the [MIT License](LICENSE).
