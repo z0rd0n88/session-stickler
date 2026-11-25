@@ -36,14 +36,14 @@ Every command works as usual. `kill` warns: run-job treats a killed child as a c
 
 1. `session-relay list`. Pick the child; check its STATE. `idle` is ready. With `--wait`, a `working` or `starting` child is waited out first and the prompt is sent when its turn ends, so the reply is to your prompt (exit 2 with "NOT sent" if the turn outlasts `--wait`); without `--wait` the prompt is queued. `held` must be released first (`session-airspace release <target>`).
 2. `session-relay send <target> --wait "<prompt>"`. Write the prompt so it stands alone. Multi-line prompts are fine. Give the Bash tool a timeout longer than `--wait` (default 600 s).
-3. Relay the printed reply to the user. On exit 2 (timeout), the child is still working: check later with `session-relay last <target>`.
+3. Relay the printed reply to the user. On exit 2 (timeout), the child is still working (any reply so far is printed): check later with `session-relay last <target>`.
 4. Exit 5 means the child is showing a dialog (a permission prompt, the trust dialog, a question, or a panel such as `/model` or `/config`). Nothing was sent: pressing Enter there would pick the highlighted option, and on a permission prompt that approves the command. Show the user the dialog (`session-relay read <target>`) and let them answer it in a terminal; do not answer it for them.
 
 ## States
 
-- `starting`: launched, no turn yet. `working`: a turn is in progress. `idle`: last turn finished. `failed`: an API error ended the last turn (blast-off's `StopFailure` hook wrote `failed.json`; `last` prints the error). `held`: paused by `session-airspace`.
+- `starting`: launched, no turn yet. `working`: a turn is in progress. `idle`: last turn finished. `background`: the last turn ended, but a shell it started in the background still runs; Claude Code starts a new turn by itself when that shell finishes. `failed`: an API error ended the last turn (blast-off's `StopFailure` hook wrote `failed.json`; `last` prints the error). `held`: paused by `session-airspace`.
 
 ## Limits
 
-- `--wait` returns at the end of the child's next turn. A child can end a turn while a command it started keeps running in the background; its later reply shows up in `last`.
+- `--wait` returns at the end of the child's next turn. If that turn leaves a shell running in the background ("waiting for the tests to finish"), it prints a note with the reply so far and waits for the turn Claude starts when the shell finishes, then prints that reply. This also covers a shell that ends just before the turn does: once a background shell was seen, the reply is taken only after `RELAY_BG_SETTLE` quiet seconds (10). Shells left running by earlier prompts (a dev server) don't count. A new shell that never finishes is capped by the `--wait` deadline: exit 2, with the reply so far. Exit 3 if the child is held while waiting, 5 if it opens a dialog.
 - `send` writes into the child's input as if typed, so slash commands (`/compact`) work too. Only send what you would type yourself.

@@ -12,6 +12,11 @@ Usage:
   session_panes.py list                 one TSV row per managed child (fields below)
   session_panes.py tree <pid>           <pid> and its descendants, parents first
   session_panes.py ram                  "used_mb total_mb avail_mb pct"
+  session_panes.py bg <pid> [socket pane_id [baseline]]
+                                        "<new> <busy> <token>": background shells started under
+                                        <pid> (a claude pid or its pane's pid) since <baseline>
+                                        (the token of an earlier call), whether a turn runs, and
+                                        a token for later calls. socket: a name, or a path
   session_panes.py last <dir>           the child's last reply (done.json), or its failure
                                         (failed.json) when that is newer
 
@@ -19,7 +24,9 @@ list fields: target name pane_pid claude_pid wrapped state rss_mb age_s activity
              pane_id runner job last
   target    "session:window_index" on the default server, "socket/session:window_index" elsewhere
   wrapped   1 if claude is a child of the pane's shell (holdable), 0 if it is the pane process
-  state     held | working | idle | failed | starting
+  state     held | working | background | idle | failed | starting
+            background: the turn ended, but a shell it started in the background still runs;
+            Claude Code starts a new turn by itself when that shell finishes
   rss_mb    resident memory of claude and every process under it
   activity  seconds since the transcript, done.json or failed.json last changed
   socket    tmux socket name, for `tmux -L <socket>`
@@ -29,6 +36,7 @@ list fields: target name pane_pid claude_pid wrapped state rss_mb age_s activity
 """
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -252,6 +260,8 @@ def cmd_list():
                 # (/model, /config) writes to the transcript and never fires Stop. (The 1 s slack:
                 # the transcript gets a last write just after the Stop hook.)
                 state = "working"
+            elif bg_status(cpid, sock, pane_id, kids=kids)[0]:
+                state = "background"
             else:
                 state = "failed" if is_failed else "idle"
             rss = sum(rss_kb(p) for p in tree(cpid, kids)) // 1024
@@ -269,15 +279,73 @@ def cmd_list():
 TURN_START_GRACE = 5   # seconds a fresh transcript write counts as "working" without the footer
 
 
-def footer_busy(socket, pane_id):
-    """True while Claude Code's footer reads "esc to interrupt", which it shows exactly while a turn
-    runs. Asks the child's own server (-L socket) for its exact pane."""
+# Background shells. Claude Code can end a turn while a shell it started in the background still
+# runs, and starts a new turn by itself when that shell finishes. Two signals, checked live:
+# - The status line under the input box lists them ("⏵⏵ auto mode on · 1 shell · ↓ to manage"),
+#   during a turn too, and never lists a foreground command. Only that footer is read: the
+#   transcript above it can hold the same words ("Ran 2 shell commands", quoted text).
+# - The Bash tool runs each command as `bash -c 'source <home>/.claude/shell-snapshots/snapshot-...'`
+#   under claude. Between turns any such shell still alive is a background one; during a turn a
+#   foreground command looks the same, so the tree counts only between turns. A shell's own
+#   subshells carry the same argv, so only the outermost counts.
+SNAPSHOT = "/shell-snapshots/snapshot-"
+RULE_RE = re.compile(r"^\s*─{8,}\s*$")
+FOOTER_SHELLS_RE = re.compile(r"(?:^|·)\s*(\d+) shells?\b", re.M)
+
+
+def tmux_socket_args(socket):
+    """-S for a socket path (from #{socket_path}), -L for a socket name."""
+    return ["-S", socket] if socket.startswith("/") else ["-L", socket]
+
+
+def screen_tail(socket, pane_id, lines=40):
+    """The last <lines> lines of a pane's screen, from its own server."""
     try:
-        screen = subprocess.run(["tmux", "-L", socket, "capture-pane", "-p", "-t", pane_id],
+        screen = subprocess.run(["tmux", *tmux_socket_args(socket), "capture-pane", "-p", "-t", pane_id],
                                 capture_output=True, text=True, timeout=5, check=False).stdout
     except (OSError, subprocess.SubprocessError):
-        return False
-    return "esc to interrupt" in "\n".join(screen.splitlines()[-30:])
+        return ""
+    return "\n".join(screen.splitlines()[-lines:])
+
+
+def footer(socket, pane_id):
+    """(busy, shells) from Claude Code's footer: the lines under the input box's lower rule (or
+    the last two non-blank lines when there is no rule). busy: "esc to interrupt", shown exactly
+    while a turn runs. shells: the background shells it lists."""
+    lines = screen_tail(socket, pane_id).splitlines()
+    rules = [i for i, line in enumerate(lines) if RULE_RE.match(line)]
+    text = "\n".join(lines[rules[-1] + 1:] if rules else [l for l in lines if l.strip()][-2:])
+    m = FOOTER_SHELLS_RE.search(text)
+    return "esc to interrupt" in text, int(m.group(1)) if m else 0
+
+
+def footer_busy(socket, pane_id):
+    return footer(socket, pane_id)[0]
+
+
+def tree_shells(pid, kids):
+    """Pids of the outermost Bash-tool shells under <pid>."""
+    found, todo = set(), [(c, False) for c in kids.get(pid, [])]
+    while todo:
+        p, parent_is_shell = todo.pop()
+        is_shell = SNAPSHOT in " ".join(argv(p))
+        if is_shell and not parent_is_shell:
+            found.add(p)
+        todo.extend((c, is_shell) for c in kids.get(p, []))
+    return found
+
+
+def bg_status(pid, socket=None, pane_id=None, baseline="", kids=None):
+    """(new, busy, token) for the child whose claude (or pane) pid is <pid>. new: background shells
+    started since <baseline>, a token from an earlier call ("" = none), so a dev server left by an
+    earlier prompt does not count. token: "<pids>/<footer count>" to pass as a later baseline."""
+    kids = kids if kids is not None else proc_children()
+    busy, listed = footer(socket, pane_id) if pane_id else (False, 0)
+    pids = tree_shells(pid, kids) if pid > 1 else set()   # no pid: never scan from init
+    base_pids, _, base_listed = baseline.partition("/")
+    base = {int(p) for p in base_pids.split(",") if p.isdigit()}
+    new = max(0 if busy else len(pids - base), listed - int(base_listed or 0))
+    return new, busy, ",".join(map(str, sorted(pids))) + f"/{listed}"
 
 
 def cmd_ram():
@@ -299,6 +367,9 @@ def main(argv):
         cmd_list()
     elif cmd == "tree" and len(argv) == 3:
         print(" ".join(str(p) for p in tree(int(argv[2]))))
+    elif cmd == "bg" and len(argv) in (3, 5, 6):
+        new, busy, token = bg_status(int(argv[2]), *argv[3:6])
+        print(new, int(busy), token)
     elif cmd == "ram":
         cmd_ram()
     elif cmd == "last" and len(argv) == 3:

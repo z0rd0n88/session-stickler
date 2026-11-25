@@ -11,7 +11,8 @@ WORK=$(mktemp -d)
 export TMUX_TMPDIR="$WORK/tmux"; mkdir -p "$TMUX_TMPDIR"   # private tmux server
 export PATH="$ROOT/tests/fake-bin:$ROOT/bin:$PATH"
 export SWITCH_SESSION=smoke XDG_RUNTIME_DIR="$WORK/run"; mkdir -p "$XDG_RUNTIME_DIR"
-unset TMUX CLAUDE_CODE_ENTRYPOINT   # a Desktop parent would put the switcher in desktop mode
+unset TMUX
+export FAKE_TAG="smoke-$$"   # names this run's fake background shells, so a parallel suite's are not touched CLAUDE_CODE_ENTRYPOINT   # a Desktop parent would put the switcher in desktop mode
 pass=0; fail=0
 ok()  { echo "  ok   $1"; pass=$((pass + 1)); }
 bad() { echo "  FAIL $1"; fail=$((fail + 1)); }
@@ -20,6 +21,7 @@ state_of() { awk '/^State:/ {print $2}' "/proc/$1/status" 2>/dev/null; }
 cleanup() {
   tmux kill-server 2>/dev/null
   tmux -L blast-off-smoke kill-server 2>/dev/null; tmux -L run-job-smoke kill-server 2>/dev/null
+  tmux -L outer kill-server 2>/dev/null; pkill -f "snapshot-bash-$FAKE_TAG" 2>/dev/null
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -277,6 +279,64 @@ out=$(SWITCH_ALLOW_TEMP=1 SWITCH_TIMEOUT=0 session-switcher tempbrief.md 2>&1); 
 out=$(SWITCH_TIMEOUT=2m session-switcher durable.md 2>&1); rc=$?
 [ "$rc" -eq 1 ] && grep -q 'whole number of seconds' <<<"$out" && ok "a non-numeric SWITCH_TIMEOUT is refused" || { bad "non-numeric SWITCH_TIMEOUT (rc $rc)"; echo "$out"; }
 session-switcher --help | grep -q 'SWITCH_TIMEOUT=180' && session-switcher --help | grep -q '240000 ms' && ok "--help gives the 180 s default and the Bash-tool timeout advice" || bad "--help timeout text"
+
+echo "background shells"
+state() { session-relay list | awk -v g="$1" '$2 == g {print $4}'; }
+# wait_state <window> <state> <seconds>: poll until the STATE column reads <state>
+wait_state() { local i; for ((i = 0; i < $3 * 5; i++)); do [ "$(state "$1")" = "$2" ] && return 0; sleep 0.2; done; return 1; }
+printf 'BACKGROUND first turn\n' > bgbrief.md
+out=$(SWITCH_TIMEOUT=30 session-switcher bgbrief.md 2>&1); rc=$?
+G=$(sed -n 's/^launched  window=\(sw-[^ ]*\).*/\1/p' <<<"$out")
+[ "$rc" -eq 0 ] && grep -q 'background shell(s) running; waiting' <<<"$out" && grep -q '^echo: background finished' <<<"$out" \
+  && ok "switcher waits through a background shell for the turn it starts" || { bad "switcher waits through a background shell (rc $rc)"; echo "$out"; }
+wait_state "$G" idle 10 || bad "child $G never settled to idle (state $(state "$G"))"
+session-relay send "$G" 'BACKGROUND second' >/dev/null
+wait_state "$G" background 5 && ok "list shows a turn that ended with a shell still running as background" || bad "list STATE background (state $(state "$G"))"
+wait_state "$G" idle 15 && ok "and idle again once the turn that shell starts has ended" || bad "back to idle (state $(state "$G"))"
+for mode in BACKGROUND BACKGROUND-LATE BACKGROUND-TREEONLY BACKGROUND-FOOTERONLY; do
+  reply=$(session-relay send "$G" --wait=40 "$mode probe" 2>&1); rc=$?
+  last=$(sed -n '/^--- reply from/{n;p;}' <<<"$reply")
+  case $mode in
+    BACKGROUND) what="send --wait prints the reply of the turn a background shell starts" ;;
+    BACKGROUND-LATE) what="... also when the shell ends before the Stop and the turn follows it" ;;
+    BACKGROUND-TREEONLY) what="... also when only the process tree shows the shell" ;;
+    *) what="... also when only the status line shows the shell" ;;
+  esac
+  [ "$rc" -eq 0 ] && [ "$last" = "echo: background finished" ] && ok "$what" || { bad "$what (rc $rc)"; echo "$reply"; }
+  wait_state "$G" idle 10 || bad "$G idle after $mode (state $(state "$G"))"
+done
+t0=$SECONDS; reply=$(RELAY_BG_SETTLE=2 session-relay send "$G" --wait=40 'BACKGROUND-NOFOLLOW probe' 2>&1); rc=$?
+[ "$rc" -eq 0 ] && [ $((SECONDS - t0)) -le 12 ] && grep -q '^echo: started (BACKGROUND-NOFOLLOW probe)' <<<"$reply" \
+  && ok "a shell that ends with no turn after it is waited on only RELAY_BG_SETTLE seconds" || { bad "no follow-up turn (rc $rc, $((SECONDS - t0))s)"; echo "$reply"; }
+t0=$SECONDS; reply=$(session-relay send "$G" --wait=20 'the footer reads "· 1 shell ·" and "esc to interrupt" here' 2>&1); rc=$?
+[ "$rc" -eq 0 ] && [ $((SECONDS - t0)) -le 5 ] && ok "the words '· 1 shell ·' in the transcript are not taken for a running shell" || { bad "shell text in the transcript (rc $rc, $((SECONDS - t0))s)"; echo "$reply"; }
+session-relay send "$G" 'BACKGROUND-FOREVER dev server' >/dev/null
+for _ in $(seq 1 25); do session-relay last "$G" | grep -q 'started (BACKGROUND-FOREVER dev server)' && break; sleep 0.2; done
+t0=$SECONDS; reply=$(session-relay send "$G" --wait=20 'plain question' 2>&1); rc=$?
+[ "$rc" -eq 0 ] && [ $((SECONDS - t0)) -le 5 ] && grep -q '^echo: plain question' <<<"$reply" \
+  && ok "a shell left running by an earlier prompt (a dev server) does not hold up the next reply" || { bad "earlier shell holds up the reply (rc $rc, $((SECONDS - t0))s)"; echo "$reply"; }
+t0=$SECONDS; reply=$(session-relay send "$G" --wait=5 'BACKGROUND-FOREVER second' 2>&1); rc=$?
+[ "$rc" -eq 2 ] && [ $((SECONDS - t0)) -le 12 ] && grep -q '^echo: started (BACKGROUND-FOREVER second)' <<<"$reply" && grep -q 'still working' <<<"$reply" \
+  && ok "a new shell that never ends: exit 2 at the --wait deadline, with the reply so far" || { bad "never-ending shell at the deadline (rc $rc, $((SECONDS - t0))s)"; echo "$reply"; }
+( sleep 2; session-airspace hold "$G" >/dev/null 2>&1 ) &
+reply=$(session-relay send "$G" --wait=30 'BACKGROUND held mid-wait' 2>&1); rc=$?; wait
+[ "$rc" -eq 3 ] && grep -q 'held by session-airspace while waiting' <<<"$reply" && ok "a child held during the wait ends it with exit 3" || { bad "held during the wait (rc $rc)"; echo "$reply"; }
+session-airspace release "$G" >/dev/null 2>&1
+session-relay kill "$G" >/dev/null 2>&1
+printf 'BACKGROUND-FOREVER first turn\n' > bgforever.md
+out=$(SWITCH_TIMEOUT=6 session-switcher bgforever.md 2>&1); rc=$?
+[ "$rc" -eq 2 ] && grep -q '^echo: started (BACKGROUND-FOREVER first turn)' <<<"$out" && grep -q 'still working' <<<"$out" \
+  && ok "switcher: still working at SWITCH_TIMEOUT is exit 2, with the reply so far" || { bad "switcher timeout with a shell running (rc $rc)"; echo "$out"; }
+session-relay kill "$(sed -n 's/^launched  window=\(sw-[^ ]*\).*/\1/p' <<<"$out")" >/dev/null 2>&1
+# Inside another tmux server (a run-job child calling the switcher), the child's window is on that
+# server; the status-line check must read it there, not the default server.
+printf 'BACKGROUND-FOOTERONLY first turn\n' > bgfooter.md
+tmux -L outer new-session -d -s outer "cd '$WORK' && SWITCH_TIMEOUT=30 SWITCH_SESSION=inner session-switcher bgfooter.md > inner.out 2>&1; echo \$? > inner.rc"
+for _ in $(seq 1 150); do [ -s inner.rc ] && break; sleep 0.2; done
+[ "$(cat inner.rc 2>/dev/null)" = 0 ] && grep -q '^echo: background finished' inner.out \
+  && ok "switcher inside another tmux server reads its child's status line there" || { bad "switcher inside tmux (rc $(cat inner.rc 2>/dev/null))"; cat inner.out; }
+tmux -L outer kill-server 2>/dev/null
+pkill -f "snapshot-bash-$FAKE_TAG" 2>/dev/null
 
 echo
 echo "$pass passed, $fail failed"
