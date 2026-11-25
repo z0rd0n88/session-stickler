@@ -29,8 +29,8 @@ Background shells (env FAKE_TAG names the marker so parallel suites don't collid
   BACKGROUND-TREEONLY    like BACKGROUND, but the status line never lists it
   BACKGROUND-FOOTERONLY  like BACKGROUND, but only the status line lists it (no process)
   BACKGROUND-AGENT       a background subagent waiting on a monitor, as seen live: a "◯ general-purpose"
-                         row under the status line and " · 1 monitor" in it, for 4 s; no shell, and
-                         no turn follows
+                         row under the status line and " · 1 monitor" in it, for 4 s, while its own
+                         command runs as an unlisted Bash-tool shell under claude; no turn follows
 It also starts one `sleep` child, so holds can be checked across a process tree."""
 import json
 import os
@@ -84,9 +84,11 @@ def background(text):
                  if f"BACKGROUND-{k}" in text), "")
     if kind == "AGENT":
         agents.append("Probe agent")
+        # the subagent's own (foreground) command: a Bash-tool shell under claude, unlisted
+        sub = subprocess.Popen(["bash", "-c", f"source /nonexistent/.claude/shell-snapshots/snapshot-bash-{TAG}.sh 2>/dev/null; sleep 4; true"])
 
         def agent_done():
-            time.sleep(4)
+            sub.wait()
             with draw_lock:
                 agents.remove("Probe agent")
                 draw()

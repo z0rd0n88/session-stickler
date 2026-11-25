@@ -317,17 +317,19 @@ def screen_tail(socket, pane_id, lines=40):
 
 
 def footer(socket, pane_id):
-    """(busy, shells, agents) from Claude Code's footer: the lines under the input box's lower rule
-    (or the last two non-blank lines when there is no rule). busy: "esc to interrupt", shown exactly
-    while a turn runs. shells: the background shells it lists. agents: background subagents and
-    monitors it lists."""
+    """(busy, shells, agents, rows) from Claude Code's footer: the lines under the input box's lower
+    rule (or the last two non-blank lines when there is no rule). busy: "esc to interrupt", shown
+    exactly while a turn runs. shells: the background shells it lists. agents: background subagents
+    and monitors it lists. rows: the subagent rows alone."""
     lines = screen_tail(socket, pane_id).splitlines()
     rules = [i for i, line in enumerate(lines) if RULE_RE.match(line)]
     text = "\n".join(lines[rules[-1] + 1:] if rules else [l for l in lines if l.strip()][-2:])
     m = FOOTER_SHELLS_RE.search(text)
     mon = FOOTER_MONITORS_RE.search(text)
-    agents = len(FOOTER_AGENT_RE.findall(text)) + (int(mon.group(1)) if mon else 0)
-    return "esc to interrupt" in text, int(m.group(1)) if m else 0, agents
+    # a subagent waiting on its own monitor shows in both, so take the larger count
+    rows = len(FOOTER_AGENT_RE.findall(text))
+    agents = max(rows, int(mon.group(1)) if mon else 0)
+    return "esc to interrupt" in text, int(m.group(1)) if m else 0, agents, rows
 
 
 def footer_busy(socket, pane_id):
@@ -346,17 +348,24 @@ def tree_shells(pid, kids):
     return found
 
 
+def base_of(baseline):
+    """The shell pids in a baseline token."""
+    return {int(p) for p in baseline.partition("/")[0].split(",") if p.isdigit()}
+
+
 def bg_status(pid, socket=None, pane_id=None, baseline="", kids=None):
     """(new, busy, token, agents) for the child whose claude (or pane) pid is <pid>. new: background
     shells started since <baseline>, a token from an earlier call ("" = none), so a dev server left
     by an earlier prompt does not count. token: "<pids>/<footer count>" to pass as a later baseline.
     agents: background subagents and monitors the footer lists (reported, never waited on)."""
     kids = kids if kids is not None else proc_children()
-    busy, listed, agents = footer(socket, pane_id) if pane_id else (False, 0, 0)
+    busy, listed, agents, rows = footer(socket, pane_id) if pane_id else (False, 0, 0, 0)
     pids = tree_shells(pid, kids) if pid > 1 else set()   # no pid: never scan from init
-    base_pids, _, base_listed = baseline.partition("/")
-    base = {int(p) for p in base_pids.split(",") if p.isdigit()}
-    new = max(0 if busy else len(pids - base), listed - int(base_listed or 0))
+    # A subagent's own commands run as Bash-tool shells under claude too, and the status line does
+    # not list them (checked live). While a subagent row shows, the tree cannot tell whose a shell
+    # is, so only the status line's count is used.
+    tree_new = 0 if (busy or rows) else len(pids - base_of(baseline))
+    new = max(tree_new, listed - int(baseline.partition("/")[2] or 0))
     return new, busy, ",".join(map(str, sorted(pids))) + f"/{listed}", agents
 
 

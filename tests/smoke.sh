@@ -315,6 +315,13 @@ t0=$SECONDS; reply=$(session-relay send "$G" --wait=30 'BACKGROUND-AGENT probe' 
   && ok "a background subagent or monitor is reported after the reply, not waited on" || { bad "background agent note (rc $rc, $((SECONDS - t0))s)"; echo "$reply"; }
 [ "$(state "$G")" = background ] && ok "list shows a child with a background agent listed as background" || bad "list STATE with a background agent (state $(state "$G"))"
 wait_state "$G" idle 10 || bad "$G idle once the agent row is gone (state $(state "$G"))"
+session-relay send "$G" 'BACKGROUND-AGENT second' >/dev/null
+for _ in $(seq 1 25); do session-relay last "$G" | grep -q 'started (BACKGROUND-AGENT second)' && break; sleep 0.2; done
+t0=$SECONDS; reply=$(session-relay send "$G" --wait=30 'plain while an agent runs' 2>&1); rc=$?
+last=$(sed -n '/^--- reply from/{n;p;}' <<<"$reply")
+[ "$rc" -eq 0 ] && [ $((SECONDS - t0)) -le 4 ] && [ "$last" = "echo: plain while an agent runs" ] \
+  && ok "a subagent's own command (unlisted shell under claude) is not taken for this prompt's background shell" || { bad "subagent shell taken as background (rc $rc, $((SECONDS - t0))s)"; echo "$reply"; }
+wait_state "$G" idle 10 || bad "$G idle after the second agent (state $(state "$G"))"
 reply=$(session-relay send "$G" --wait=20 'the screen says ◯ general-purpose and · 1 monitor · here' 2>&1)
 ! grep -q 'not waited on' <<<"$reply" && ok "agent and monitor words in the transcript are not taken for a running agent" || { bad "agent words in the transcript"; echo "$reply"; }
 session-relay send "$G" 'BACKGROUND-FOREVER dev server' >/dev/null
