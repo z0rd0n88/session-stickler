@@ -13,21 +13,32 @@ reads "s to use this session only · Enter to save · Esc to cancel", and the ne
 (recorded as <dir>/picked).
 
 The screen is drawn as Claude Code draws it: output above, then the input box between two rules,
-then a status line: "⏵⏵ auto mode on", plus " · N shell(s)" while background shells run (never for a
-foreground command) and " · esc to interrupt" while a turn runs. Turns run one at a time.
+then a status line: "⏵⏵ auto mode on", plus the background work it counts (below; never a foreground
+command) and " · esc to interrupt" while a turn runs. Turns run one at a time.
 
-Background shells (env FAKE_TAG names the marker so parallel suites don't collide). A prompt with
-  BACKGROUND             starts a shell as the Bash tool does in the background (`bash -c 'source
-                         .../.claude/shell-snapshots/snapshot-bash-<tag>.sh; sleep 4; true'`),
-                         listed in the status line, and ends its turn ("echo: started (...)"); when
-                         the shell exits, after a 1.2 s gap, a turn of its own replies
-                         "echo: background finished", as Claude Code does
+Background work (env FAKE_TAG names the marker so parallel suites don't collide). A prompt can hold
+several of these; each starts its work and the turn ends ("echo: started (...)"). When a piece of work
+ends, after a 1.2 s gap, a turn of its own replies "echo: <kind> finished", as Claude Code does:
+  BACKGROUND             a shell as the Bash tool starts one in the background (`bash -c 'source
+                         .../.claude/shell-snapshots/snapshot-bash-<tag>.sh; sleep 4; true'`), listed
+                         in the status line; its turn replies "background finished"
   BACKGROUND-LATE        the shell (1 s) ends while the turn is still running (3 s); the turn of
                          its own still follows the Stop, 1.2 s later
   BACKGROUND-NOFOLLOW    a 2 s shell, and no turn follows it
   BACKGROUND-FOREVER     a 60 s shell (longer than any test waits), no turn follows
   BACKGROUND-TREEONLY    like BACKGROUND, but the status line never lists it
   BACKGROUND-FOOTERONLY  like BACKGROUND, but only the status line lists it (no process)
+  BACKGROUND-MONITOR     a 4 s monitor: a shell under claude, counted as "monitor"; "monitor finished"
+  BACKGROUND-AGENT       a 4 s subagent: a "◯ general-purpose" row under the status line, which then
+                         reads "N background tasks" (as seen live). Its own command runs for the first
+                         half as an unlisted Bash-tool shell under claude; for the second half it has
+                         no process at all, as a subagent thinking between commands; its turn replies
+                         "agent finished (<kind>)", e.g. "agent finished (agent-late)"
+  BACKGROUND-AGENT-LATE  a 2.5 s subagent that ends while the turn is still running (3 s)
+  BACKGROUND-AGENT-LONG  a 12 s subagent; every prompt typed while it runs starts another 3 s
+                         unlisted shell of its own, as a subagent's commands do
+The status line reads "· 1 shell", "· 2 monitors", "· 1 shell, 1 monitor", or "· N background tasks"
+while a subagent runs, as Claude Code's does, and "· /tasks to see subagents" once one has ended.
 It also starts one `sleep` child, so holds can be checked across a process tree."""
 import json
 import os
@@ -54,18 +65,30 @@ delay = float(os.environ.get("FAKE_DELAY", "0.5"))
 TAG = os.environ.get("FAKE_TAG", "fake")
 RULE = "─" * 78
 history = ["fake claude ready"]
-shells = []                     # background shells: {"proc": Popen or None, "listed": bool}
+work = []                       # background work: {"kind": shell|monitor|agent, "listed": bool, ...}
+agents_ended = False
 turn_lock = threading.Lock()    # one turn at a time
 draw_lock = threading.RLock()   # one redraw at a time
 busy = False
 
 
+def plural(n, word):
+    return f"{n} {word}{'s' if n > 1 else ''}"
+
+
 def draw():
     with draw_lock:
-        listed = sum(1 for sh in shells if sh["listed"])
-        status = "  ⏵⏵ auto mode on" + (f" · {listed} shell{'s' if listed > 1 else ''}" if listed else "") \
-            + (" · esc to interrupt" if busy else "")
-        print("\x1b[2J\x1b[H" + "\n".join(history[-15:] + ["", RULE, "❯ ", RULE, status]), flush=True)
+        n = {k: sum(1 for w in work if w["kind"] == k and w["listed"]) for k in ("shell", "monitor", "agent")}
+        if n["agent"]:
+            counts = [plural(sum(n.values()), "background task")]
+        else:
+            counts = [", ".join(plural(n[k], k) for k in ("shell", "monitor") if n[k])] if n["shell"] or n["monitor"] else []
+            if agents_ended:
+                counts.append("/tasks to see subagents")
+        status = "  ⏵⏵ auto mode on" + "".join(f" · {c}" for c in counts) + (" · esc to interrupt" if busy else "")
+        rows = ["  ● main"] + [f"  ◯ general-purpose  {w['task']} · waiting on 1 shell, 1 monitor"
+                               for w in work if w["kind"] == "agent"] if n["agent"] else []
+        print("\x1b[2J\x1b[H" + "\n".join(history[-15:] + ["", RULE, "❯ ", RULE, status] + rows), flush=True)
 
 
 def say(line):
@@ -74,34 +97,56 @@ def say(line):
         draw()
 
 
-def background(text):
-    kind = next((k for k in ("LATE", "NOFOLLOW", "FOREVER", "TREEONLY", "FOOTERONLY")
-                 if f"BACKGROUND-{k}" in text), "")
-    secs = {"LATE": 1, "NOFOLLOW": 2, "FOREVER": 60}.get(kind, 4)
-    # `; true` keeps bash from exec'ing sleep (and losing its argv), as the Bash tool's own trailing
-    # commands do.
-    proc = None if kind == "FOOTERONLY" else subprocess.Popen(
-        ["bash", "-c", f"source /nonexistent/.claude/shell-snapshots/snapshot-bash-{TAG}.sh 2>/dev/null; sleep {secs}; true"])
-    sh = {"proc": proc, "listed": kind != "TREEONLY"}
-    shells.append(sh)
+def tool_shell(secs):
+    """A Bash-tool shell under claude. `; true` keeps bash from exec'ing sleep (and losing its argv),
+    as the Bash tool's own trailing commands do."""
+    return subprocess.Popen(["bash", "-c", f"source /nonexistent/.claude/shell-snapshots/snapshot-bash-{TAG}.sh 2>/dev/null; sleep {secs}; true"])
+
+
+def start(kind):
+    """Start one piece of background work for a BACKGROUND[-<kind>] word."""
+    if kind.startswith("AGENT"):
+        secs = {"AGENT-LATE": 2.5, "AGENT-LONG": 12}.get(kind, 4)
+        w = {"kind": "agent", "listed": True, "task": f"Probe {kind.lower()}", "proc": tool_shell(secs / 2),
+             "tail": secs / 2, "long": kind == "AGENT-LONG", "follow": f"agent finished ({kind.lower()})"}
+    elif kind == "MONITOR":
+        w = {"kind": "monitor", "listed": True, "proc": tool_shell(4), "follow": "monitor finished"}
+    else:
+        secs = {"LATE": 1, "NOFOLLOW": 2, "FOREVER": 60}.get(kind, 4)
+        w = {"kind": "shell", "listed": kind != "TREEONLY", "secs": secs,
+             "proc": None if kind == "FOOTERONLY" else tool_shell(secs),
+             "follow": None if kind in ("NOFOLLOW", "FOREVER") else "background finished"}
+    work.append(w)
 
     def finish():
-        proc.wait() if proc else time.sleep(secs)
+        global agents_ended
+        w["proc"].wait() if w["proc"] else time.sleep(w["secs"])
+        time.sleep(w.get("tail", 0))   # a subagent with no process between its commands
         with draw_lock:
-            shells.remove(sh)
+            work.remove(w)
+            if w["kind"] == "agent":
+                agents_ended = True
             draw()
-        if kind in ("NOFOLLOW", "FOREVER"):
+        if not w["follow"]:
             return
         with turn_lock:   # waits for a turn that is running, as Claude Code queues it
             pass
-        time.sleep(1.2)   # Claude Code starts its own turn about a second after the shell ends
-        answer("background finished")
+        time.sleep(1.2)   # Claude Code starts its own turn about a second after the work ends
+        answer(w["follow"])
 
     threading.Thread(target=finish, daemon=True).start()
+
+
+def background(text):
+    for kind in re.findall(r"\bBACKGROUND(?:-([A-Z]+(?:-[A-Z]+)?))?\b", text):
+        start(kind)
     return f"started ({text})"
 
 
 def answer(text, error=None):
+    for w in list(work):
+        if w.get("long"):
+            tool_shell(3)   # a long subagent runs another command of its own, unlisted
     with open(transcript, "a") as f:
         f.write(json.dumps({"type": "user", "text": text}) + "\n")
     if text.startswith("/"):
@@ -132,7 +177,7 @@ def turn(text, error=None):
         if "BACKGROUND" in text:
             text = background(text)
             draw()
-        steps = 30 if ("SLOW" in text or "BACKGROUND-LATE" in text) else int(delay * 10)
+        steps = 30 if re.search(r"SLOW|BACKGROUND-(AGENT-)?LATE", text) else int(delay * 10)
         for _ in range(steps):   # small steps, so time held is lost
             time.sleep(0.1)
         busy = False
@@ -169,6 +214,6 @@ while True:
         answer(pending.strip("\n"))
         pending = ""
 helper.kill()
-for sh in shells:
-    if sh["proc"]:
-        sh["proc"].kill()
+for w in work:
+    if w["proc"]:
+        w["proc"].kill()

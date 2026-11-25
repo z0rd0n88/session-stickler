@@ -13,10 +13,12 @@ Usage:
   session_panes.py tree <pid>           <pid> and its descendants, parents first
   session_panes.py ram                  "used_mb total_mb avail_mb pct"
   session_panes.py bg <pid> [socket pane_id [baseline]]
-                                        "<new> <busy> <token>": background shells started under
-                                        <pid> (a claude pid or its pane's pid) since <baseline>
-                                        (the token of an earlier call), whether a turn runs, and
-                                        a token for later calls. socket: a name, or a path
+                                        "<new> <busy> <token>": background work (shells, monitors,
+                                        subagents) started under <pid> (a claude pid or its pane's
+                                        pid) since <baseline> (the token of an earlier call), whether
+                                        a turn runs, and a token for later calls. socket: a name, or
+                                        a path
+  session_panes.py footer               "<busy> <work> <rows>" for a screen's text on stdin (tests)
   session_panes.py last <dir>           the child's last reply (done.json), or its failure
                                         (failed.json) when that is newer
 
@@ -25,8 +27,8 @@ list fields: target name pane_pid claude_pid wrapped state rss_mb age_s activity
   target    "session:window_index" on the default server, "socket/session:window_index" elsewhere
   wrapped   1 if claude is a child of the pane's shell (holdable), 0 if it is the pane process
   state     held | working | background | idle | failed | starting
-            background: the turn ended, but a shell it started in the background still runs;
-            Claude Code starts a new turn by itself when that shell finishes
+            background: the turn ended, but work it started in the background (a shell, a
+            monitor or a subagent) still runs; Claude Code starts a new turn by itself when it ends
   rss_mb    resident memory of claude and every process under it
   activity  seconds since the transcript, done.json or failed.json last changed
   socket    tmux socket name, for `tmux -L <socket>`
@@ -279,18 +281,27 @@ def cmd_list():
 TURN_START_GRACE = 5   # seconds a fresh transcript write counts as "working" without the footer
 
 
-# Background shells. Claude Code can end a turn while a shell it started in the background still
-# runs, and starts a new turn by itself when that shell finishes. Two signals, checked live:
-# - The status line under the input box lists them ("⏵⏵ auto mode on · 1 shell · ↓ to manage"),
-#   during a turn too, and never lists a foreground command. Only that footer is read: the
-#   transcript above it can hold the same words ("Ran 2 shell commands", quoted text).
+# Background work. Claude Code can end a turn while work it started in the background still runs:
+# a shell, a monitor (a watched shell) or a subagent. It starts a new turn by itself when that work
+# finishes, and that turn holds the real answer. Two signals, checked live:
+# - The status line under the input box counts it: "⏵⏵ auto mode on · 1 shell · ↓ to manage",
+#   "· 1 shell, 1 monitor ·", "· 2 monitors ·", or "· 3 background tasks ·" while a subagent runs
+#   (the subagent's own background shells included). It shows during a turn too, and never counts a
+#   foreground command. Each running subagent is also a row under the status line ("◯ general-purpose
+#   <what it is doing>"; "● main" is the session itself). Only the lines under the input box's lower
+#   rule are read: the transcript above it can hold the same words ("Ran 2 shell commands", quotes).
 # - The Bash tool runs each command as `bash -c 'source <home>/.claude/shell-snapshots/snapshot-...'`
-#   under claude. Between turns any such shell still alive is a background one; during a turn a
-#   foreground command looks the same, so the tree counts only between turns. A shell's own
-#   subshells carry the same argv, so only the outermost counts.
+#   under claude (monitors too). Between turns any such shell still alive is background work; during
+#   a turn a foreground command looks the same, so the tree counts only between turns. A subagent's
+#   own foreground commands look the same too, so while a subagent row shows (that row is counted
+#   anyway) the tree is not read. A shell's own subshells carry the same argv: only the outermost counts.
 SNAPSHOT = "/shell-snapshots/snapshot-"
 RULE_RE = re.compile(r"^\s*─{8,}\s*$")
-FOOTER_SHELLS_RE = re.compile(r"(?:^|·)\s*(\d+) shells?\b", re.M)
+ROW_RE = re.compile(r"^\s*[◯●]\s+\S")           # a subagent row, or the "● main" row above them
+MAIN_ROW_RE = re.compile(r"^\s*●\s+main\b")
+AGENT_ROW_RE = re.compile(r"^\s*◯\s+\S")
+COUNT_RE = re.compile(r"(?:^|[·,])\s*(\d+)\s+(?:(?:background\s+)?(?:shells?|monitors?)|background\s+tasks?)\b", re.M)
+BUSY_RE = re.compile(r"esc\s+to\s+interrupt")    # a narrow pane can wrap it
 
 
 def tmux_socket_args(socket):
@@ -308,15 +319,32 @@ def screen_tail(socket, pane_id, lines=40):
     return "\n".join(screen.splitlines()[-lines:])
 
 
-def footer(socket, pane_id):
-    """(busy, shells) from Claude Code's footer: the lines under the input box's lower rule (or
-    the last two non-blank lines when there is no rule). busy: "esc to interrupt", shown exactly
-    while a turn runs. shells: the background shells it lists."""
-    lines = screen_tail(socket, pane_id).splitlines()
+def parse_footer(screen):
+    """(busy, work, rows) from the text of Claude Code's screen. The footer is the lines under the
+    input box's lower rule; with no rule, the subagent rows at the very bottom and the two non-blank
+    lines above them. busy: "esc to interrupt", shown exactly while a turn runs. work: the
+    background work counted (the status line's counts summed, or the subagent rows when there are
+    more of those). rows: the subagent rows alone. Row text (a subagent's task) is never counted."""
+    lines = screen.splitlines()
     rules = [i for i, line in enumerate(lines) if RULE_RE.match(line)]
-    text = "\n".join(lines[rules[-1] + 1:] if rules else [l for l in lines if l.strip()][-2:])
-    m = FOOTER_SHELLS_RE.search(text)
-    return "esc to interrupt" in text, int(m.group(1)) if m else 0
+    if rules:
+        tail = lines[rules[-1] + 1:]
+    else:
+        tail = [l for l in lines if l.strip()]
+        n = len(tail)
+        while n and ROW_RE.match(tail[n - 1]):
+            n -= 1
+        tail = tail[max(0, n - 2):]
+    # subagent rows sit under the "● main" row; a "◯" line anywhere else is not one
+    main = next((i for i, l in enumerate(tail) if MAIN_ROW_RE.match(l)), None)
+    rows = 0 if main is None else sum(1 for l in tail[main + 1:] if AGENT_ROW_RE.match(l))
+    status = "\n".join(l for l in tail if not ROW_RE.match(l))
+    counted = sum(int(n) for n in COUNT_RE.findall(status))
+    return bool(BUSY_RE.search(status)), max(counted, rows), rows
+
+
+def footer(socket, pane_id):
+    return parse_footer(screen_tail(socket, pane_id))
 
 
 def footer_busy(socket, pane_id):
@@ -335,17 +363,35 @@ def tree_shells(pid, kids):
     return found
 
 
+def parse_token(token):
+    """(shell pids, work, rows) from a token of bg_status."""
+    pids, _, rest = (token or "").partition("/")
+    work, _, rows = rest.partition("/")
+    return ({int(p) for p in pids.split(",") if p.isdigit()},
+            int(work) if work.isdigit() else 0, int(rows) if rows.isdigit() else 0)
+
+
 def bg_status(pid, socket=None, pane_id=None, baseline="", kids=None):
-    """(new, busy, token) for the child whose claude (or pane) pid is <pid>. new: background shells
-    started since <baseline>, a token from an earlier call ("" = none), so a dev server left by an
-    earlier prompt does not count. token: "<pids>/<footer count>" to pass as a later baseline."""
+    """(new, busy, token) for the child whose claude (or pane) pid is <pid>. new: background work
+    started since <baseline>, a token from an earlier call ("" = none), so a dev server or subagent
+    left by an earlier prompt does not count. busy: a turn runs. token: "<pids>/<work>/<rows>" to
+    pass as a later baseline."""
     kids = kids if kids is not None else proc_children()
-    busy, listed = footer(socket, pane_id) if pane_id else (False, 0)
+    busy, work, rows = footer(socket, pane_id) if pane_id else (False, 0, 0)
     pids = tree_shells(pid, kids) if pid > 1 else set()   # no pid: never scan from init
-    base_pids, _, base_listed = baseline.partition("/")
-    base = {int(p) for p in base_pids.split(",") if p.isdigit()}
-    new = max(0 if busy else len(pids - base), listed - int(base_listed or 0))
-    return new, busy, ",".join(map(str, sorted(pids))) + f"/{listed}"
+    base_pids, base_work, base_rows = parse_token(baseline)
+    tree_new = 0 if (busy or rows) else len(pids - base_pids)
+    if base_rows:
+        # A subagent from an earlier prompt was running at the baseline. The status line's counts then
+        # mix its work with this prompt's (its shells end, or it starts new ones), and subagents have
+        # no pid to tell them apart. So only what is surely new counts: more subagent rows than the
+        # baseline had, or, once no row shows, Bash-tool shells not in the baseline. The caller says
+        # the result is uncertain (its baseline token ends in a non-zero row count).
+        new = max(tree_new, rows - base_rows)
+    else:
+        # A new subagent counts even when an earlier prompt's shell has ended since the baseline.
+        new = max(tree_new, work - base_work, rows - base_rows)
+    return new, busy, ",".join(map(str, sorted(pids))) + f"/{work}/{rows}"
 
 
 def cmd_ram():
@@ -370,6 +416,9 @@ def main(argv):
     elif cmd == "bg" and len(argv) in (3, 5, 6):
         new, busy, token = bg_status(int(argv[2]), *argv[3:6])
         print(new, int(busy), token)
+    elif cmd == "footer" and len(argv) == 2:
+        busy, work, rows = parse_footer(sys.stdin.read())
+        print(int(busy), work, rows)
     elif cmd == "ram":
         cmd_ram()
     elif cmd == "last" and len(argv) == 3:
