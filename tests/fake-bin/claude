@@ -13,8 +13,8 @@ reads "s to use this session only · Enter to save · Esc to cancel", and the ne
 (recorded as <dir>/picked).
 
 The screen is drawn as Claude Code draws it: output above, then the input box between two rules,
-then a status line: "⏵⏵ auto mode on", plus " · N shell(s)" while background shells run (never for a
-foreground command) and " · esc to interrupt" while a turn runs. Turns run one at a time.
+then a status line: "⏵⏵ auto mode on", plus the background work it counts (below; never a foreground
+command) and " · esc to interrupt" while a turn runs. Turns run one at a time.
 
 Background work (env FAKE_TAG names the marker so parallel suites don't collide). A prompt can hold
 several of these; each starts its work and the turn ends ("echo: started (...)"). When a piece of work
@@ -30,8 +30,9 @@ ends, after a 1.2 s gap, a turn of its own replies "echo: <kind> finished", as C
   BACKGROUND-FOOTERONLY  like BACKGROUND, but only the status line lists it (no process)
   BACKGROUND-MONITOR     a 4 s monitor: a shell under claude, counted as "monitor"; "monitor finished"
   BACKGROUND-AGENT       a 4 s subagent: a "◯ general-purpose" row under the status line, which then
-                         reads "N background tasks" (as seen live), while its own command runs as an
-                         unlisted Bash-tool shell under claude; "agent finished"
+                         reads "N background tasks" (as seen live). Its own command runs for the first
+                         half as an unlisted Bash-tool shell under claude; for the second half it has
+                         no process at all, as a subagent thinking between commands; "agent finished"
   BACKGROUND-AGENT-LATE  a 2.5 s subagent that ends while the turn is still running (3 s)
   BACKGROUND-AGENT-LONG  a 12 s subagent; every prompt typed while it runs starts another 3 s
                          unlisted shell of its own, as a subagent's commands do
@@ -105,8 +106,8 @@ def start(kind):
     """Start one piece of background work for a BACKGROUND[-<kind>] word."""
     if kind.startswith("AGENT"):
         secs = {"AGENT-LATE": 2.5, "AGENT-LONG": 12}.get(kind, 4)
-        w = {"kind": "agent", "listed": True, "task": f"Probe {kind.lower()}", "proc": tool_shell(secs),
-             "long": kind == "AGENT-LONG", "follow": "agent finished"}
+        w = {"kind": "agent", "listed": True, "task": f"Probe {kind.lower()}", "proc": tool_shell(secs / 2),
+             "tail": secs / 2, "long": kind == "AGENT-LONG", "follow": "agent finished"}
     elif kind == "MONITOR":
         w = {"kind": "monitor", "listed": True, "proc": tool_shell(4), "follow": "monitor finished"}
     else:
@@ -119,6 +120,7 @@ def start(kind):
     def finish():
         global agents_ended
         w["proc"].wait() if w["proc"] else time.sleep(w["secs"])
+        time.sleep(w.get("tail", 0))   # a subagent with no process between its commands
         with draw_lock:
             work.remove(w)
             if w["kind"] == "agent":

@@ -298,8 +298,10 @@ TURN_START_GRACE = 5   # seconds a fresh transcript write counts as "working" wi
 SNAPSHOT = "/shell-snapshots/snapshot-"
 RULE_RE = re.compile(r"^\s*─{8,}\s*$")
 ROW_RE = re.compile(r"^\s*[◯●]\s+\S")           # a subagent row, or the "● main" row above them
+MAIN_ROW_RE = re.compile(r"^\s*●\s+main\b")
 AGENT_ROW_RE = re.compile(r"^\s*◯\s+\S")
-COUNT_RE = re.compile(r"(?:^|[·,])\s*(\d+)\s+(?:background\s+)?(?:shells?|monitors?|tasks?)\b", re.M)
+COUNT_RE = re.compile(r"(?:^|[·,])\s*(\d+)\s+(?:(?:background\s+)?(?:shells?|monitors?)|background\s+tasks?)\b", re.M)
+BUSY_RE = re.compile(r"esc\s+to\s+interrupt")    # a narrow pane can wrap it
 
 
 def tmux_socket_args(socket):
@@ -333,10 +335,12 @@ def parse_footer(screen):
         while n and ROW_RE.match(tail[n - 1]):
             n -= 1
         tail = tail[max(0, n - 2):]
-    rows = sum(1 for l in tail if AGENT_ROW_RE.match(l))
+    # subagent rows sit under the "● main" row; a "◯" line anywhere else is not one
+    main = next((i for i, l in enumerate(tail) if MAIN_ROW_RE.match(l)), None)
+    rows = 0 if main is None else sum(1 for l in tail[main + 1:] if AGENT_ROW_RE.match(l))
     status = "\n".join(l for l in tail if not ROW_RE.match(l))
     counted = sum(int(n) for n in COUNT_RE.findall(status))
-    return "esc to interrupt" in status, max(counted, rows), rows
+    return bool(BUSY_RE.search(status)), max(counted, rows), rows
 
 
 def footer(socket, pane_id):

@@ -12,7 +12,8 @@ export TMUX_TMPDIR="$WORK/tmux"; mkdir -p "$TMUX_TMPDIR"   # private tmux server
 export PATH="$ROOT/tests/fake-bin:$ROOT/bin:$PATH"
 export SWITCH_SESSION=smoke XDG_RUNTIME_DIR="$WORK/run"; mkdir -p "$XDG_RUNTIME_DIR"
 unset TMUX
-export FAKE_TAG="smoke-$$"   # names this run's fake background shells, so a parallel suite's are not touched CLAUDE_CODE_ENTRYPOINT   # a Desktop parent would put the switcher in desktop mode
+export FAKE_TAG="smoke-$$"   # names this run's fake background shells, so a parallel suite's are not touched
+unset CLAUDE_CODE_ENTRYPOINT   # a Desktop parent would put the switcher in desktop mode
 pass=0; fail=0
 ok()  { echo "  ok   $1"; pass=$((pass + 1)); }
 bad() { echo "  FAIL $1"; fail=$((fail + 1)); }
@@ -291,6 +292,8 @@ T="● Ran 2 shell commands · 3 background tasks\n$R\n❯ \n$R\n"
   && ok "background tasks with a subagent row; the row's own words are not counted" || bad "background tasks: $(fp "$T  ⏵⏵ auto mode on · 3 background tasks\n  ● main\n  ◯ general-purpose  Run 4 shells · waiting on 1 shell, 1 monitor")"
 [ "$(fp "$T  ⏵⏵ auto mode on\n  ● main\n  ◯ general-purpose  Explore\n  ◯ Plan  Write it up")" = "0 2 2" ] && ok "subagent rows count with no count in the status line" || bad "rows alone"
 [ "$(fp "$T  ⏵⏵ auto mode on · /tasks to see subagents")" = "0 0 0" ] && ok "the /tasks hint after a subagent ended is not work" || bad "/tasks hint"
+[ "$(fp "$T  ⏵⏵ auto mode on · 2 tasks\n  ◯ /ide for Visual Studio Code")" = "0 0 0" ] && ok "a task count, and a ◯ line with no ● main row above it, are not work" || bad "tasks / stray ◯: $(fp "$T  ⏵⏵ auto mode on · 2 tasks\n  ◯ /ide for Visual Studio Code")"
+[ "$(fp "$T  ⏵⏵ bypass permissions on (shift+tab to cycle) · 1 shell · esc to\n  interrupt")" = "1 1 0" ] && ok "esc to interrupt wrapped onto two lines still reads as a turn" || bad "wrapped busy: $(fp "$T  ⏵⏵ bypass permissions on (shift+tab to cycle) · 1 shell · esc to\n  interrupt")"
 [ "$(fp "old text · 9 shells\nmore text\n⏵⏵ auto mode on · 1 shell\n  ● main\n  ◯ general-purpose  Run 5 shells")" = "0 1 1" ] \
   && ok "with no rule: the status line and the rows under it" || bad "no rule: $(fp "old text · 9 shells\nmore text\n⏵⏵ auto mode on · 1 shell\n  ● main\n  ◯ general-purpose  Run 5 shells")"
 
