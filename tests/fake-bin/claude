@@ -32,7 +32,8 @@ ends, after a 1.2 s gap, a turn of its own replies "echo: <kind> finished", as C
   BACKGROUND-AGENT       a 4 s subagent: a "◯ general-purpose" row under the status line, which then
                          reads "N background tasks" (as seen live). Its own command runs for the first
                          half as an unlisted Bash-tool shell under claude; for the second half it has
-                         no process at all, as a subagent thinking between commands; "agent finished"
+                         no process at all, as a subagent thinking between commands; its turn replies
+                         "agent finished (<kind>)", e.g. "agent finished (agent-late)"
   BACKGROUND-AGENT-LATE  a 2.5 s subagent that ends while the turn is still running (3 s)
   BACKGROUND-AGENT-LONG  a 12 s subagent; every prompt typed while it runs starts another 3 s
                          unlisted shell of its own, as a subagent's commands do
@@ -107,7 +108,7 @@ def start(kind):
     if kind.startswith("AGENT"):
         secs = {"AGENT-LATE": 2.5, "AGENT-LONG": 12}.get(kind, 4)
         w = {"kind": "agent", "listed": True, "task": f"Probe {kind.lower()}", "proc": tool_shell(secs / 2),
-             "tail": secs / 2, "long": kind == "AGENT-LONG", "follow": "agent finished"}
+             "tail": secs / 2, "long": kind == "AGENT-LONG", "follow": f"agent finished ({kind.lower()})"}
     elif kind == "MONITOR":
         w = {"kind": "monitor", "listed": True, "proc": tool_shell(4), "follow": "monitor finished"}
     else:

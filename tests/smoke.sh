@@ -332,8 +332,8 @@ for mode in BACKGROUND-MONITOR BACKGROUND-AGENT BACKGROUND-AGENT-LATE 'BACKGROUN
   last=$(sed -n '/^--- reply from/{n;p;}' <<<"$reply")
   case $mode in
     BACKGROUND-MONITOR) want="monitor finished" what="send --wait follows a background monitor to the turn it starts" ;;
-    BACKGROUND-AGENT) want="agent finished" what="... and a background subagent" ;;
-    BACKGROUND-AGENT-LATE) want="agent finished" what="... also when the subagent ends before the Stop" ;;
+    BACKGROUND-AGENT) want="agent finished (agent)" what="... and a background subagent" ;;
+    BACKGROUND-AGENT-LATE) want="agent finished (agent-late)" what="... also when the subagent ends before the Stop" ;;
     *) want="background finished" what="... and a subagent plus a shell only the process tree shows, to the last turn" ;;
   esac
   [ "$rc" -eq 0 ] && [ "$last" = "echo: $want" ] && ok "$what" || { bad "$what (rc $rc)"; echo "$reply"; }
@@ -347,9 +347,24 @@ t0=$SECONDS; reply=$(session-relay send "$G" --wait=30 'plain while an agent run
 last=$(sed -n '/^--- reply from/{n;p;}' <<<"$reply")
 [ "$rc" -eq 0 ] && [ $((SECONDS - t0)) -le 6 ] && [ "$last" = "echo: plain while an agent runs" ] \
   && ok "an earlier prompt's subagent, and the commands it starts, don't hold up the next reply" || { bad "earlier subagent holds up the reply (rc $rc, $((SECONDS - t0))s)"; echo "$reply"; }
+grep -q 'a subagent from an earlier prompt was still running' <<<"$reply" && ok "... and the reply says background work may not all have been waited on" || { bad "uncertainty note"; echo "$reply"; }
+reply=$(session-relay send "$G" --wait=30 'BACKGROUND-AGENT new while an earlier agent runs' 2>&1); rc=$?
+last=$(sed -n '/^--- reply from/{n;p;}' <<<"$reply")
+# (the earlier subagent's own follow-up turn can land within the settle time and be the last word)
+[ "$rc" -eq 0 ] && [[ "$last" == "echo: agent finished ("* ]] && grep -q 'a subagent from an earlier prompt' <<<"$reply" \
+  && ok "a new subagent beside an earlier one is still waited on, with the note" || { bad "new subagent beside an earlier one (rc $rc)"; echo "$reply"; }
 # idle shows for a moment between the subagent's end and the turn it starts, so wait for that turn
-for _ in $(seq 1 125); do [ "$(session-relay last "$G")" = "echo: agent finished" ] && break; sleep 0.2; done
+for _ in $(seq 1 125); do [ "$(session-relay last "$G")" = "echo: agent finished (agent-long)" ] && break; sleep 0.2; done
 wait_state "$G" idle 10 || bad "$G idle after the long agent's turn (state $(state "$G"))"
+# A shell from an earlier prompt ends while this prompt's subagent runs: the status line's count
+# stays level, so only the subagent row's own baseline shows the subagent is new.
+session-relay send "$G" 'BACKGROUND-NOFOLLOW earlier shell' >/dev/null
+for _ in $(seq 1 25); do session-relay last "$G" | grep -q 'started (BACKGROUND-NOFOLLOW earlier shell)' && break; sleep 0.2; done
+reply=$(RELAY_BG_SETTLE=2 session-relay send "$G" --wait=30 'BACKGROUND-AGENT SLOW after a shell' 2>&1); rc=$?
+last=$(sed -n '/^--- reply from/{n;p;}' <<<"$reply")
+[ "$rc" -eq 0 ] && [ "$last" = "echo: agent finished (agent)" ] && ! grep -q 'earlier prompt' <<<"$reply" \
+  && ok "a new subagent is waited on when an earlier shell ends meanwhile (rows have their own baseline)" || { bad "subagent after an earlier shell (rc $rc)"; echo "$reply"; }
+wait_state "$G" idle 10 || bad "$G idle after the subagent (state $(state "$G"))"
 t0=$SECONDS; reply=$(session-relay send "$G" --wait=20 'the screen says ◯ general-purpose and · 3 background tasks · 1 shell, 2 monitors here' 2>&1); rc=$?
 [ "$rc" -eq 0 ] && [ $((SECONDS - t0)) -le 5 ] && grep -q '^echo: the screen says' <<<"$reply" \
   && ok "agent, task and monitor words in the transcript are not taken for background work" || { bad "work words in the transcript (rc $rc, $((SECONDS - t0))s)"; echo "$reply"; }
@@ -373,7 +388,7 @@ out=$(SWITCH_TIMEOUT=6 session-switcher bgforever.md 2>&1); rc=$?
 session-relay kill "$(sed -n 's/^launched  window=\(sw-[^ ]*\).*/\1/p' <<<"$out")" >/dev/null 2>&1
 printf 'BACKGROUND-AGENT first turn\n' > bgagent.md
 out=$(SWITCH_TIMEOUT=40 session-switcher bgagent.md 2>&1); rc=$?
-[ "$rc" -eq 0 ] && grep -q 'background work running' <<<"$out" && grep -q '^echo: agent finished' <<<"$out" \
+[ "$rc" -eq 0 ] && grep -q 'background work running' <<<"$out" && grep -q '^echo: agent finished (agent)' <<<"$out" \
   && ok "switcher follows a background subagent to the turn it starts" || { bad "switcher background agent (rc $rc)"; echo "$out"; }
 session-relay kill "$(sed -n 's/^launched  window=\(sw-[^ ]*\).*/\1/p' <<<"$out")" >/dev/null 2>&1
 # Inside another tmux server (a run-job child calling the switcher), the child's window is on that

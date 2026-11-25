@@ -21,7 +21,9 @@
 # handoff) also work.
 # --wait follows a turn that ends with background work running (a shell, a monitor or a subagent)
 # through to the turn Claude starts when that work finishes, and prints that reply (work left
-# running by earlier prompts doesn't count).
+# running by earlier prompts doesn't count). While a subagent from an earlier prompt runs, only
+# surely new work is waited on (a new subagent, or a new shell once no subagent shows), and the
+# reply ends with a note saying so.
 # send exits 3 if the child is held, 4 for a blast-off child without --force, 5 if it shows a
 # dialog (Enter would answer it; after a sent prompt, the reply so far is printed first), 2 on a
 # --wait timeout (after a sent prompt, with the reply so far), 1 if claude exits while waiting.
@@ -34,7 +36,7 @@ LIB="$(cd "$(dirname "$(readlink -f "$0")")/../lib" && pwd)"
 # shellcheck source=lib/session-common.sh
 . "$LIB/session-common.sh"
 
-usage() { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; }
 
 # dialog_line: print the footer line of a choice dialog on the child's screen (a permission prompt,
 # the trust dialog, a question menu, a /model or /config panel) and succeed; fail when there is
@@ -209,6 +211,12 @@ bg_status() { python3 "$LIB/session_panes.py" bg "$T_CLAUDE" "$T_SOCKET" "$T_PAN
 print_reply() {
   echo "--- reply from $T_TARGET ---"
   python3 "$LIB/session_panes.py" last "$T_DIR" || echo "(no message in Stop event; see: session-relay read $T_TARGET)"
+  # A subagent from an earlier prompt was running when this prompt was sent (the baseline token ends
+  # in its row count): its work and this prompt's can't be told apart, so only surely new work was
+  # waited on (session_panes.py bg_status).
+  if [ "${bg_base##*/}" -gt 0 ] 2>/dev/null; then
+    echo "(note: a subagent from an earlier prompt was still running when this was sent, so background work this prompt started may not all have been waited on, and Claude may start more turns when it ends. Later: session-relay last $T_TARGET)"
+  fi
 }
 
 cmd_last() {

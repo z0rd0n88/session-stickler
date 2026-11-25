@@ -381,8 +381,16 @@ def bg_status(pid, socket=None, pane_id=None, baseline="", kids=None):
     pids = tree_shells(pid, kids) if pid > 1 else set()   # no pid: never scan from init
     base_pids, base_work, base_rows = parse_token(baseline)
     tree_new = 0 if (busy or rows) else len(pids - base_pids)
-    # A new subagent counts even when an earlier prompt's shell has ended since the baseline.
-    new = max(tree_new, work - base_work, rows - base_rows)
+    if base_rows:
+        # A subagent from an earlier prompt was running at the baseline. The status line's counts then
+        # mix its work with this prompt's (its shells end, or it starts new ones), and subagents have
+        # no pid to tell them apart. So only what is surely new counts: more subagent rows than the
+        # baseline had, or, once no row shows, Bash-tool shells not in the baseline. The caller says
+        # the result is uncertain (its baseline token ends in a non-zero row count).
+        new = max(tree_new, rows - base_rows)
+    else:
+        # A new subagent counts even when an earlier prompt's shell has ended since the baseline.
+        new = max(tree_new, work - base_work, rows - base_rows)
     return new, busy, ",".join(map(str, sorted(pids))) + f"/{work}/{rows}"
 
 
