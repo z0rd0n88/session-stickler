@@ -360,11 +360,11 @@ wait_state "$G" idle 10 || bad "$G idle after the long agent's turn (state $(sta
 # stays level, so only the subagent row's own baseline shows the subagent is new.
 session-relay send "$G" 'BACKGROUND-NOFOLLOW earlier shell' >/dev/null
 for _ in $(seq 1 25); do session-relay last "$G" | grep -q 'started (BACKGROUND-NOFOLLOW earlier shell)' && break; sleep 0.2; done
-reply=$(RELAY_BG_SETTLE=2 session-relay send "$G" --wait=30 'BACKGROUND-AGENT SLOW after a shell' 2>&1); rc=$?
+reply=$(RELAY_BG_SETTLE=2 session-relay send "$G" --wait=40 'BACKGROUND-AGENT-LONG SLOW after a shell' 2>&1); rc=$?
 last=$(sed -n '/^--- reply from/{n;p;}' <<<"$reply")
-[ "$rc" -eq 0 ] && [ "$last" = "echo: agent finished (agent)" ] && ! grep -q 'earlier prompt' <<<"$reply" \
+[ "$rc" -eq 0 ] && [ "$last" = "echo: agent finished (agent-long)" ] && ! grep -q 'earlier prompt' <<<"$reply" \
   && ok "a new subagent is waited on when an earlier shell ends meanwhile (rows have their own baseline)" || { bad "subagent after an earlier shell (rc $rc)"; echo "$reply"; }
-wait_state "$G" idle 10 || bad "$G idle after the subagent (state $(state "$G"))"
+wait_state "$G" idle 15 || bad "$G idle after the subagent (state $(state "$G"))"
 t0=$SECONDS; reply=$(session-relay send "$G" --wait=20 'the screen says ◯ general-purpose and · 3 background tasks · 1 shell, 2 monitors here' 2>&1); rc=$?
 [ "$rc" -eq 0 ] && [ $((SECONDS - t0)) -le 5 ] && grep -q '^echo: the screen says' <<<"$reply" \
   && ok "agent, task and monitor words in the transcript are not taken for background work" || { bad "work words in the transcript (rc $rc, $((SECONDS - t0))s)"; echo "$reply"; }
